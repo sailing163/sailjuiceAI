@@ -50,7 +50,7 @@ function srp_db_migrate() {
  */
 
 function srp_rya_bulk_import_page() {
-  if (!current_user_can('manage_options')) return;
+  if (!current_user_can('edit_posts')) return;
 
   echo '<div class="wrap"><h1>RYA Bulk Import</h1>';
   echo '<p>Upload an XLSX file (first sheet) where each row is a result record. This importer supports <strong>date-only</strong> exports. It will help you match each race group to the correct TackTracker <code>raceid</code> before importing.</p>';
@@ -191,7 +191,7 @@ function srp_rya_bulk_import_page() {
 	  	    $ymd = is_string($g['date']) ? $g['date'] : '';
 	  	    if (!preg_match('/^\\d{4}-\\d{2}-\\d{2}$/', $ymd)) continue;
 	  	    if (!isset($tt_candidates[$ymd])) {
-	  	     srp_tt_list_races_by_date('YYYY-MM-DD')
+	  	    $tt_candidates[$ymd] = srp_tt_list_races_by_date($ymd);
 	  	    }
 	  	  }
 
@@ -463,6 +463,7 @@ add_action('admin_menu', function () {
   add_submenu_page(null,'Race View','Race View','manage_options','srp-race-view','srp_race_view_page');
   add_submenu_page('sail-results-parser','Sailing Imports','Sailing Imports','manage_options','edit.php?post_type=srp_import');
   add_submenu_page('sail-results-parser','Settings','Settings','manage_options','srp-settings','srp_settings_page');
+  add_submenu_page('sail-results-parser','Data QA','Data QA','manage_options','srp-data-qa','srp_data_qa_page');
 });
 
 add_action('admin_init', function () {
@@ -476,7 +477,7 @@ add_action('admin_init', function () {
 add_action('wp_ajax_srp_save_row_edit', 'srp_ajax_save_row_edit');
 
 function srp_settings_page() {
-  if (!current_user_can('manage_options')) return;
+  if (!current_user_can('edit_posts')) return;
   echo '<div class="wrap"><h1>Sail Results Parser Settings</h1><form method="post" action="options.php">';
   settings_fields('srp_settings');
   $api_key = get_option('srp_tt_api_key', '');
@@ -518,7 +519,7 @@ add_shortcode('sail_results_import', function($atts) {
 });
 
 function srp_admin_page() {
-  if (!current_user_can('manage_options')) return;
+  if (!current_user_can('edit_posts')) return;
   echo '<div class="wrap"><h1>Sailing Results Import</h1>';
   echo '<p>Save will <strong>update</strong> the existing record if the TT raceid already exists.</p>';
   srp_render_import_ui(['context'=>'admin','show_debug'=>true,'show_map'=>true]);
@@ -526,10 +527,10 @@ function srp_admin_page() {
 }
 
 function srp_race_index_page() {
-  if (!current_user_can('manage_options')) return;
+  if (!current_user_can('edit_posts')) return;
   $imports = get_posts(['post_type'=>'srp_import','post_status'=>['private'],'numberposts'=>2000,'orderby'=>'modified','order'=>'DESC']);
-  echo '<div class="wrap"><h1>Race Index</h1><p>Saved imports list (search + sort). Click a race to open it.</p>';
-  echo '<table id="srp_race_index" class="widefat striped"><thead><tr><th>Race ID</th><th>Race Name</th><th>Start</th><th>Updated</th><th>Has Course</th><th>Has Marks</th><th>Rows</th></tr></thead><tbody>';
+  echo '<div class="wrap"><h1>Race Index</h1><p>Saved imports list (search + sort). Click a race to open it.</p><style>#srp_race_index thead th{position:sticky;top:32px;background:#fff;z-index:5;}#srp_race_index{border-collapse:separate;}</style><div id="srp_race_index_filters" style="margin:12px 0; display:flex; gap:12px; align-items:center; flex-wrap:wrap;"><label>Start from <input type="date" id="srp_start_from" /></label><label>to <input type="date" id="srp_start_to" /></label><button type="button" class="button" id="srp_clear_dates">Clear</button></div>';
+  echo '<table id="srp_race_index" class="widefat striped"><thead><tr><th>Race ID</th><th>Race Name</th><th>Start</th><th>Updated</th><th>Has Course</th><th>Has Marks</th><th>Rows</th><th>Actions</th></tr></thead><tbody>';
   foreach($imports as $p){
     $raceid=get_post_meta($p->ID,'srp_raceid',true);
     $racename=get_post_meta($p->ID,'srp_race_name',true);
@@ -542,9 +543,42 @@ function srp_race_index_page() {
     $has_course=($course&&$course!=='null')?'Yes':'No';
     $has_marks=($marks&&$marks!=='null')?'Yes':'No';
     $view=admin_url('admin.php?page=srp-race-view&post_id='.intval($p->ID));
-    echo '<tr><td><a href="'.esc_url($view).'">'.esc_html($raceid).'</a></td><td>'.esc_html($racename).'</td><td>'.esc_html($start).'</td><td>'.esc_html(get_the_modified_date('Y-m-d H:i',$p)).'</td><td>'.esc_html($has_course).'</td><td>'.esc_html($has_marks).'</td><td>'.esc_html($rows_n).'</td></tr>';
+        $del = wp_nonce_url(admin_url('admin-post.php?action=srp_delete_import&post_id='.intval($p->ID)), 'srp_delete_import_'.$p->ID);
+    $ovr = wp_nonce_url(admin_url('admin-post.php?action=srp_overwrite_import&post_id='.intval($p->ID)), 'srp_overwrite_import_'.$p->ID);
+    $actions = '<a class="button button-small" href="'.esc_url($view).'">View</a> ';
+    $actions .= '<a class="button button-small" href="'.esc_url($ovr).'">Overwrite</a> ';
+    $actions .= '<a class="button button-small" style="color:#b32d2e;border-color:#b32d2e;" href="'.esc_url($del).'" onclick="return confirm(\'Delete this race import?\');">Delete</a>';
+    echo '<tr><td><a href="'.esc_url($view).'">'.esc_html($raceid).'</a></td><td>'.esc_html($racename).'</td><td>'.esc_html($start).'</td><td>'.esc_html(get_the_modified_date('Y-m-d H:i',$p)).'</td><td>'.esc_html($has_course).'</td><td>'.esc_html($has_marks).'</td><td>'.esc_html($rows_n).'</td><td>'.$actions.'</td></tr>';
   }
-  echo '</tbody></table><script>jQuery(function($){ if($.fn.DataTable) $("#srp_race_index").DataTable({pageLength:25,order:[[3,"desc"]]});});</script></div>';
+  echo '</tbody></table><script>jQuery(function($){
+  if(!$.fn.DataTable) return;
+  // Date range filter on Start column (index 2).
+  $.fn.dataTable.ext.search.push(function(settings, data){
+    if(settings.nTable && settings.nTable.id !== "srp_race_index") return true;
+    var min = $("#srp_start_from").val();
+    var max = $("#srp_start_to").val();
+    var start = (data[2] || "").toString();
+    var d = start.length >= 10 ? start.substring(0,10) : "";
+    if(!min && !max) return true;
+    if(!d) return false;
+    if(min && d < min) return false;
+    if(max && d > max) return false;
+    return true;
+  });
+  var dt = $("#srp_race_index").DataTable({
+    pageLength: 100,
+    lengthMenu: [[25,50,100,200,-1],[25,50,100,200,"All"]],
+    order: [[2,"desc"]],
+    autoWidth: false,
+    fixedHeader: true
+  });
+  function redraw(){ dt.draw(false); dt.columns.adjust(); }
+  $("#srp_start_from,#srp_start_to").on("change", redraw);
+  $("#srp_clear_dates").on("click", function(){ $("#srp_start_from").val(""); $("#srp_start_to").val(""); redraw(); });
+  // Adjust headers after initial render.
+  setTimeout(function(){ dt.columns.adjust(); }, 0);
+  $(window).on("resize", function(){ dt.columns.adjust(); });
+});</script></div>';
 }
 
 
@@ -553,7 +587,7 @@ function srp_race_index_page() {
 
 
 function srp_class_stats_page() {
-  if (!current_user_can('manage_options')) return;
+  if (!current_user_can('edit_posts')) return;
 
   // Filters
   $filter_class = isset($_GET['srp_class']) ? sanitize_text_field((string)$_GET['srp_class']) : '';
@@ -743,7 +777,7 @@ function srp_class_stats_page() {
 function srp_race_view_page() {
   $class_stats = [];
   $calc_debug = null;
-  if (!current_user_can('manage_options')) return;
+  if (!current_user_can('edit_posts')) return;
   $post_id=isset($_GET['post_id'])?intval($_GET['post_id']):0;
   if(!$post_id||get_post_type($post_id)!=='srp_import'){ echo '<div class="wrap"><h1>Race View</h1><p><em>Invalid race.</em></p></div>'; return; }
 
@@ -1094,62 +1128,127 @@ echo "<script>{$srp_js}</script>";
   } else echo '<p><em>No class stats saved for this race yet.</em></p>';
 
   echo '<h2>Imported Results</h2>';
-  if(is_array($rows)&&!empty($rows)){
-    $headers=array_keys($rows[0]);
-    // Hide legacy derived columns from older saves
-    $headers = array_values(array_filter($headers, function($h){ return !in_array($h, ['Derived PY','Derived GL'], true); }));
+  $view = isset($_GET['view']) ? sanitize_text_field(wp_unslash($_GET['view'])) : '';
+  if ($view !== 'raw') $view = 'rya';
+  $base_url = admin_url('admin.php?page=srp-race-view&post_id='.(int)$post_id);
+  echo '<p style="margin:6px 0 12px 0;">'
+    .'<a class="button '.($view==='rya'?'button-primary':'').'" href="'.esc_url($base_url.'&view=rya').'">RYA view</a> '
+    .'<a class="button '.($view==='raw'?'button-primary':'').'" href="'.esc_url($base_url.'&view=raw').'">Raw view</a>'
+    .'</p>';
+  if (is_array($rows) && !empty($rows)) {
+    if ($view === 'raw') {
+      $headers = array_keys($rows[0]);
+      // Hide legacy derived columns from older saves
+      $headers = array_values(array_filter($headers, function($h){ return !in_array($h, ['Derived PY','Derived GL'], true); }));
 
-    // Ensure a manual exclusion column exists.
-    if (!in_array('Excluded manual', $headers, true)) {
-      $headers[] = 'Excluded manual';
-    }
-    // Add per-row actions
-    $headers[] = 'Actions';
-
-    $editable = ['Finish','Elapsed','Laps','GL','Corrected'];
-
-    echo '<table id="srp_race_rows" class="widefat striped"><thead><tr>';
-    foreach($headers as $h) echo '<th>'.esc_html($h).'</th>';
-    echo '</tr></thead><tbody>';
-    foreach($rows as $idx=>$r){
-      $is_ex = ((isset($r['Excluded']) && $r['Excluded']==='Yes') || (isset($r['Excluded (All)']) && $r['Excluded (All)']==='Yes'));
-      $tr_class = ($is_ex ? ' class="srp-excluded-row"' : '');
-      echo '<tr data-row-idx="'.(int)$idx.'"'.$tr_class.'>';
-      foreach($headers as $h){
-        if($h==='Actions'){
-          echo '<td><button type="button" class="button button-primary srp-row-save" disabled>Save</button></td>';
-        }elseif($h==='Excluded manual'){
-          $val = (string)($r['Excluded manual'] ?? 'No');
-          $checked = (strcasecmp($val,'yes')===0) ? 'checked' : '';
-          echo '<td style="text-align:center"><input type="checkbox" class="srp-manual-ex" '.$checked.' /></td>';
-        }elseif(in_array($h,$editable,true)){
-          $cell=(string)($r[$h]??'');
-          echo '<td><input type="text" class="srp-edit" data-field="'.esc_attr($h).'" value="'.esc_attr($cell).'" style="width:100%" /></td>';
-        }else{
-          echo '<td>'.esc_html($r[$h]??'').'</td>';
-        }
+      // Ensure a manual exclusion column exists.
+      if (!in_array('Excluded manual', $headers, true)) {
+        $headers[] = 'Excluded manual';
       }
-      echo '</tr>';
-    }
-    echo '</tbody></table>';
+      // Add per-row actions
+      $headers[] = 'Actions';
 
-    // DataTables + sticky header (FixedHeader extension isn't always bundled)
+      $editable = ['Finish','Elapsed','Laps','GL','Corrected'];
+
+      echo '<table id="srp_race_rows" class="widefat striped"><thead><tr>';
+      foreach ($headers as $h) echo '<th>' . esc_html($h) . '</th>';
+      echo '</tr></thead><tbody>';
+      foreach ($rows as $idx => $r) {
+        $is_ex = ((isset($r['Excluded']) && $r['Excluded']==='Yes') || (isset($r['Excluded (All)']) && $r['Excluded (All)']==='Yes'));
+        $tr_class = ($is_ex ? ' class="srp-excluded-row"' : '');
+        echo '<tr data-row-idx="' . (int)$idx . '"' . $tr_class . '>';
+        foreach ($headers as $h) {
+          if ($h === 'Actions') {
+            echo '<td><button type="button" class="button button-primary srp-row-save" disabled>Save</button></td>';
+          } elseif ($h === 'Excluded manual') {
+            $val = (string)($r['Excluded manual'] ?? 'No');
+            $checked = (strcasecmp($val,'yes')===0) ? 'checked' : '';
+            echo '<td style="text-align:center"><input type="checkbox" class="srp-manual-ex" ' . $checked . ' /></td>';
+          } elseif (in_array($h, $editable, true)) {
+            $cell = (string)($r[$h] ?? '');
+            echo '<td><input type="text" class="srp-edit" data-field="' . esc_attr($h) . '" value="' . esc_attr($cell) . '" style="width:100%" /></td>';
+          } else {
+            echo '<td>' . esc_html($r[$h] ?? '') . '</td>';
+          }
+        }
+        echo '</tr>';
+      }
+      echo '</tbody></table>';
+    } else {
+      // RYA condensed view
+      $headers = ['RANK','SAIL NUMBER','HELM NAME','CREW NAME','CLASS','CONFIG.','PY','ACHIEVED PY','LAPS','ELAPSED','CORR.','PY DIFF.','Excluded manual','Actions'];
+
+      echo '<table id="srp_race_rows" class="widefat striped"><thead><tr>';
+      foreach ($headers as $h) echo '<th>' . esc_html($h) . '</th>';
+      echo '</tr></thead><tbody>';
+
+      foreach ($rows as $idx => $r) {
+        $rank = $r['rank'] ?? $r['RANK'] ?? '';
+        $sail = $r['sail_number'] ?? $r['SAIL NUMBER'] ?? $r['sailno'] ?? '';
+        $helm = $r['help_name'] ?? $r['helm_name'] ?? $r['HELM NAME'] ?? $r['helm'] ?? '';
+        $crew = $r['crew_name'] ?? $r['CREW NAME'] ?? $r['crew'] ?? '';
+        $class = $r['class_name'] ?? $r['class'] ?? $r['CLASS'] ?? '';
+        $persons = $r['class_persons'] ?? $r['persons'] ?? '';
+        $rig = $r['class_rig'] ?? $r['rig'] ?? '';
+        $spin = $r['class_spinnaker'] ?? $r['spinnaker'] ?? '';
+        $config = trim((string)$persons) . '|' . trim((string)$rig) . '|' . trim((string)$spin);
+        $py = $r['GL'] ?? $r['rating'] ?? $r['PY'] ?? '';
+        $ach = $r['Derived PY/GL (All)'] ?? $r['Derived PY/GL'] ?? $r['ACHIEVED PY'] ?? '';
+        $laps = $r['Laps'] ?? $r['laps'] ?? $r['laps_norm'] ?? '';
+        $elapsed = $r['Elapsed'] ?? $r['elapsed_time'] ?? $r['elapsed'] ?? '';
+
+        $py_f = is_numeric($py) ? (float)$py : 0.0;
+        $laps_i = is_numeric($laps) ? max(1, (int)$laps) : 1;
+        $elapsed_f = is_numeric($elapsed) ? (float)$elapsed : 0.0;
+
+        // Corrected per lap
+        $corr = '';
+        if ($py_f > 0 && $elapsed_f > 0) {
+          $corr = (int)round((($elapsed_f / $laps_i) * 1000.0) / $py_f);
+        }
+
+        $ach_f = is_numeric($ach) ? (float)$ach : null;
+        $pydiff = ($ach_f !== null && $py_f > 0) ? (int)round($py_f - $ach_f) : '';
+
+        $manual = (string)($r['Excluded manual'] ?? 'No');
+        $checked = (strcasecmp($manual,'yes')===0) ? 'checked' : '';
+
+        echo '<tr data-row-idx="' . (int)$idx . '">';
+        echo '<td>' . esc_html($rank) . '</td>';
+        echo '<td>' . esc_html($sail) . '</td>';
+        echo '<td>' . esc_html($helm) . '</td>';
+        echo '<td>' . esc_html($crew) . '</td>';
+        echo '<td>' . esc_html($class) . '</td>';
+        echo '<td>' . esc_html($config) . '</td>';
+
+        // Editable fields
+        echo '<td><input class="srp-edit" data-field="GL" value="' . esc_attr($py) . '" style="width:90px" /></td>';
+        echo '<td>' . esc_html($ach) . '</td>';
+        echo '<td><input class="srp-edit" data-field="Laps" value="' . esc_attr($laps) . '" style="width:70px" /></td>';
+        echo '<td><input class="srp-edit" data-field="Elapsed" value="' . esc_attr($elapsed) . '" style="width:90px" /></td>';
+        echo '<td>' . esc_html($corr) . '</td>';
+        echo '<td>' . esc_html($pydiff) . '</td>';
+
+        echo '<td style="text-align:center"><input type="checkbox" class="srp-manual-ex" ' . $checked . ' /></td>';
+        echo '<td><button type="button" class="button button-primary srp-row-save" disabled>Save</button></td>';
+        echo '</tr>';
+      }
+
+      echo '</tbody></table>';
+    }
+
     $nonce = wp_create_nonce('srp_row_edit');
     echo '<script>jQuery(function($){
       if($.fn.DataTable){
-        $("#srp_race_rows").DataTable({paging:false, searching:true, info:true, scrollY:"60vh", scrollCollapse:true, scrollX:true});
-        if($("#srp_race_class_stats").length) $("#srp_race_class_stats").DataTable({paging:false,searching:false,info:false, scrollY:false});
+        var dt = $("#srp_race_rows").DataTable({paging:false, searching:true, info:true, scrollY:"60vh", scrollCollapse:true, scrollX:true, autoWidth:false, fixedHeader:true});
+        dt.columns.adjust();
+        $(window).on("resize", function(){ dt.columns.adjust(); });
       }
-
-      // Sticky headers
-      $("<style>#srp_race_rows thead th, #srp_race_class_stats thead th{position:sticky;top:0;background:#fff;z-index:3;}#srp_race_rows_wrapper .dataTables_scrollHead{overflow:visible!important;}</style>").appendTo("head");
-
-      var nonce = '.wp_json_encode($nonce).';
-      var postId = '.(int)$post_id.';
-
+      $("<style>#srp_race_rows_wrapper .dataTables_scrollHead{overflow:visible!important;}</style>").appendTo("head");
+      var nonce = ' . wp_json_encode($nonce) . ';
+      var postId = ' . (int)$post_id . ';
       function markDirty($tr){ $tr.addClass("srp-dirty"); $tr.find(".srp-row-save").prop("disabled", false); }
       $(document).on("input change", ".srp-edit, .srp-manual-ex", function(){ markDirty($(this).closest("tr")); });
-
       $(document).on("click", ".srp-row-save", function(){
         var $btn=$(this); var $tr=$btn.closest("tr");
         var rowIdx=parseInt($tr.data("row-idx"),10);
@@ -1159,13 +1258,13 @@ echo "<script>{$srp_js}</script>";
         $btn.prop("disabled", true).text("Saving...");
         $.post(ajaxurl,{action:"srp_save_row_edit",nonce:nonce,post_id:postId,row_idx:rowIdx,fields:fields,manual_excluded:manualExcluded})
           .done(function(resp){ if(resp && resp.success){ window.location.reload(); }
-            else { alert((resp&&resp.data&&resp.data.message)?resp.data.message:"Save failed"); $btn.prop("disabled",false).text("Save"); }} )
+            else { alert((resp&&resp.data&&resp.data.message)?resp.data.message:"Save failed"); $btn.prop("disabled",false).text("Save"); } })
           .fail(function(){ alert("Save failed"); $btn.prop("disabled",false).text("Save"); });
       });
     });</script>';
-  } else echo '<p><em>No rows saved.</em></p>';
-
-  echo '</div>';
+  } else {
+    echo '<p><em>No rows saved for this race.</em></p>';
+  }
 }
 
 function srp_render_import_ui(array $opts) {
@@ -1306,7 +1405,7 @@ add_action('admin_menu', function(){
 
 
 function srp_class_graph_page(){
-  if (!current_user_can('manage_options')) return;
+  if (!current_user_can('edit_posts')) return;
   $class = isset($_GET['class']) ? sanitize_text_field($_GET['class']) : '';
   if (!$class){
     echo '<div class="wrap"><h1>No class specified</h1></div>';
@@ -1481,7 +1580,7 @@ add_action('admin_head', function(){
 });
 
 function srp_tools_page(){
-  if (!current_user_can('manage_options')) return;
+  if (!current_user_can('edit_posts')) return;
   echo '<div class="wrap"><h1>SRP Tools</h1>';
   if (isset($_GET['srp_done'])){
     echo '<div class="notice notice-success"><p>Recalculation completed.</p></div>';
@@ -1495,7 +1594,7 @@ function srp_tools_page(){
 }
 
 add_action('admin_post_srp_recalc_all', function(){
-  if (!current_user_can('manage_options')) wp_die('Not allowed');
+  if (!current_user_can('edit_posts')) wp_die('Not allowed');
   if (!isset($_POST['srp_nonce']) || !wp_verify_nonce($_POST['srp_nonce'], 'srp_recalc_all')) wp_die('Bad nonce');
 
   $posts = get_posts([
@@ -1528,7 +1627,7 @@ add_action('admin_post_srp_recalc_all', function(){
  * Recomputes stored SCT/PY/GL immediately so rogue rows cannot pollute class stats.
  */
 function srp_ajax_save_row_edit(){
-  if (!current_user_can('manage_options')){
+  if (!current_user_can('edit_posts')){
     wp_send_json_error(['message' => 'Permission denied'], 403);
   }
   $nonce = isset($_POST['nonce']) ? sanitize_text_field(wp_unslash($_POST['nonce'])) : '';
@@ -1561,16 +1660,310 @@ function srp_ajax_save_row_edit(){
 
   update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($rows));
 
-  // Recompute dual analysis immediately
-  if (function_exists('srp_compute_dual_analysis')){
-    $dual = srp_compute_dual_analysis($rows);
-    if (is_array($dual)){
-      update_post_meta($post_id, 'srp_analysis_dual', $dual);
-      if (isset($dual['all']['rows'])) update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($dual['all']['rows']));
-      if (isset($dual['all']['class_stats'])) update_post_meta($post_id, 'srp_class_stats', wp_json_encode($dual['all']['class_stats']));
-      if (isset($dual['all']['debug'])) update_post_meta($post_id, 'srp_calc_debug', wp_json_encode($dual['all']['debug']));
+  // Recompute derived PY/GL immediately after edits
+  $k = floatval(get_option('srp_outlier_k', 2.0));
+  $norm_rows = $rows;
+
+  // Normalize common RYA field names into canonical keys used by stats.php
+  foreach ($norm_rows as $i => $r) {
+    if (!isset($norm_rows[$i]['GL']) || $norm_rows[$i]['GL'] === '') {
+      if (isset($r['rating']) && $r['rating'] !== '') $norm_rows[$i]['GL'] = $r['rating'];
+      elseif (isset($r['PY']) && $r['PY'] !== '') $norm_rows[$i]['GL'] = $r['PY'];
     }
+    if (!isset($norm_rows[$i]['Elapsed']) || $norm_rows[$i]['Elapsed'] === '') {
+      if (isset($r['elapsed_time']) && $r['elapsed_time'] !== '') $norm_rows[$i]['Elapsed'] = $r['elapsed_time'];
+      elseif (isset($r['elapsed']) && $r['elapsed'] !== '') $norm_rows[$i]['Elapsed'] = $r['elapsed'];
+    }
+    if (!isset($norm_rows[$i]['Laps']) || $norm_rows[$i]['Laps'] === '') {
+      if (isset($r['laps']) && $r['laps'] !== '') $norm_rows[$i]['Laps'] = $r['laps'];
+      elseif (isset($r['laps_norm']) && $r['laps_norm'] !== '') $norm_rows[$i]['Laps'] = $r['laps_norm'];
+    }
+    if (!isset($norm_rows[$i]['class']) || $norm_rows[$i]['class'] === '') {
+      if (isset($r['class_name']) && $r['class_name'] !== '') $norm_rows[$i]['class'] = $r['class_name'];
+      elseif (isset($r['Class']) && $r['Class'] !== '') $norm_rows[$i]['class'] = $r['Class'];
+    }
+    if (!isset($norm_rows[$i]['elapsed']) || $norm_rows[$i]['elapsed'] === '') {
+      if (isset($norm_rows[$i]['Elapsed'])) $norm_rows[$i]['elapsed'] = $norm_rows[$i]['Elapsed'];
+    }
+    if (!isset($norm_rows[$i]['laps_norm']) || $norm_rows[$i]['laps_norm'] === '') {
+      if (isset($norm_rows[$i]['Laps'])) $norm_rows[$i]['laps_norm'] = $norm_rows[$i]['Laps'];
+    }
+    if (!isset($norm_rows[$i]['py']) || $norm_rows[$i]['py'] === '') {
+      if (isset($norm_rows[$i]['GL'])) $norm_rows[$i]['py'] = $norm_rows[$i]['GL'];
+    }
+  }
+
+  if (function_exists('srp_compute_dual')) {
+    $dual = srp_compute_dual($norm_rows, $k);
+    // Prefer the ALL method as the primary saved dataset
+    $updated_rows = $dual['all']['rows'] ?? $norm_rows;
+    $class_stats  = $dual['all']['class_stats'] ?? [];
+    $debug        = $dual['all']['debug'] ?? [];
+
+    // Ensure derived columns exist on every row so the header always shows them
+    $must_cols = [
+      'Derived PY/GL','Derived PY/GL (All)','Derived PY/GL (Best)',
+      'Excluded','Excluded (All)','Excluded (Best)',
+      'Excluded Reason (All)','Excluded Reason (Best)'
+    ];
+    foreach ($updated_rows as $ri => $rr) {
+      foreach ($must_cols as $c) {
+        if (!array_key_exists($c, $updated_rows[$ri])) $updated_rows[$ri][$c] = '';
+      }
+    }
+
+    update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($updated_rows));
+    update_post_meta($post_id, 'srp_class_stats', wp_json_encode($class_stats));
+    update_post_meta($post_id, 'srp_calc_debug', wp_json_encode($debug));
   }
 
   wp_send_json_success(['ok'=>true]);
 }
+
+// -----------------------------------------------------------------------------
+// Race Index actions: overwrite + delete
+// -----------------------------------------------------------------------------
+add_action('admin_post_srp_delete_import', 'srp_delete_import_handler');
+function srp_delete_import_handler() {
+  if (!current_user_can('delete_posts')) wp_die('Not allowed');
+  $post_id = isset($_GET['post_id']) ? intval($_GET['post_id']) : 0;
+  if (!$post_id) wp_die('Missing post_id');
+  check_admin_referer('srp_delete_import_' . $post_id);
+  wp_trash_post($post_id);
+  wp_redirect(admin_url('admin.php?page=srp-race-index&deleted=1'));
+  exit;
+}
+
+add_action('admin_post_srp_overwrite_import', 'srp_overwrite_import_handler');
+function srp_overwrite_import_handler() {
+  if (!current_user_can('edit_posts')) wp_die('Not allowed');
+  $post_id = isset($_GET['post_id']) ? intval($_GET['post_id']) : 0;
+  if (!$post_id) wp_die('Missing post_id');
+  check_admin_referer('srp_overwrite_import_' . $post_id);
+
+  $raceid = get_post_meta($post_id, 'srp_raceid', true);
+  if (!$raceid) wp_die('Missing raceid');
+
+  // Re-fetch TT details/course/marks and overwrite stored meta
+  $race = srp_tt_fetch_race_details($raceid);
+  if (is_array($race) && empty($race['error'])) update_post_meta($post_id, 'srp_tt_race_details', wp_json_encode($race));
+
+  $course = srp_tt_fetch_course($raceid);
+  if (is_array($course) && empty($course['error'])) update_post_meta($post_id, 'srp_tt_course', wp_json_encode($course));
+
+  $marks = srp_tt_fetch_marks($raceid);
+  if (is_array($marks) && empty($marks['error'])) update_post_meta($post_id, 'srp_tt_marks', wp_json_encode($marks));
+
+  wp_redirect(admin_url('admin.php?page=srp-race-view&post_id=' . $post_id . '&overwritten=1'));
+  exit;
+}
+
+
+
+/**
+ * Data QA: find suspicious rows (e.g., typos in elapsed time) across all imports.
+ * Heuristic: per-lap elapsed far above the race median, or absolute elapsed very large.
+ */
+function srp_data_qa_page() {
+  if (!current_user_can('manage_options')) {
+    wp_die('Sorry, you are not allowed to access this page.');
+  }
+
+  // Handle filters
+  $days = isset($_GET['days']) ? max(1, intval($_GET['days'])) : 3650; // default: ~10 years
+  $mult = isset($_GET['mult']) ? max(2, floatval($_GET['mult'])) : 3.0; // per-lap multiple vs median
+  $abs  = isset($_GET['abs']) ? max(3600, intval($_GET['abs'])) : 8*3600; // absolute elapsed threshold (seconds), default 8h
+  $limit= isset($_GET['limit']) ? max(50, intval($_GET['limit'])) : 500;
+
+  $since = gmdate('Y-m-d\TH:i:s', time() - ($days*86400));
+
+  $q = new WP_Query([
+    'post_type'      => 'srp_import',
+    'post_status'    => ['publish','draft','pending','private','future'],
+    'posts_per_page' => $limit,
+    'orderby'        => 'modified',
+    'order'          => 'DESC',
+    'meta_query'     => [
+      [
+        'key'     => 'srp_tt_race_details',
+        'compare' => 'EXISTS',
+      ]
+    ],
+  ]);
+
+  echo '<div class="wrap"><h1>Data QA</h1>';
+  echo '<p>Flags suspicious result rows (e.g., typo elapsed time). This does not change data until you save a correction.</p>';
+
+  // Filter form
+  echo '<form method="get" style="margin:12px 0; padding:10px; background:#fff; border:1px solid #ddd;">';
+  echo '<input type="hidden" name="page" value="srp-data-qa" />';
+  echo '<label style="margin-right:10px;">Look back days <input type="number" name="days" value="'.esc_attr($days).'" min="1" style="width:110px;"></label>';
+  echo '<label style="margin-right:10px;">Per-lap &gt; median × <input type="number" step="0.1" name="mult" value="'.esc_attr($mult).'" min="2" style="width:90px;"></label>';
+  echo '<label style="margin-right:10px;">Elapsed &gt; (sec) <input type="number" name="abs" value="'.esc_attr($abs).'" min="3600" style="width:110px;"></label>';
+  echo '<label style="margin-right:10px;">Scan max races <input type="number" name="limit" value="'.esc_attr($limit).'" min="50" style="width:110px;"></label>';
+  echo '<button class="button button-primary">Refresh</button>';
+  echo '</form>';
+
+  $flags = [];
+
+  foreach ($q->posts as $post) {
+    $post_id = $post->ID;
+    $raceid  = get_post_meta($post_id, 'srp_raceid', true);
+    $racenm  = get_post_meta($post_id, 'srp_race_name', true);
+    $start   = '';
+    $rd_json = get_post_meta($post_id, 'srp_tt_race_details', true);
+    if ($rd_json) {
+      $rd = json_decode($rd_json, true);
+      if (is_array($rd)) {
+        $start = $rd['startDateTime'] ?? $rd['start'] ?? '';
+      }
+    }
+    if ($start === '') $start = get_post_meta($post_id, 'srp_start', true);
+
+    $rows_json = get_post_meta($post_id, 'srp_parsed_rows', true);
+    if (!$rows_json) continue;
+    $rows = json_decode($rows_json, true);
+    if (!is_array($rows) || empty($rows)) continue;
+
+    // Collect per-lap elapsed values for median
+    $perlaps = [];
+    foreach ($rows as $r) {
+      $elapsed = $r['Elapsed'] ?? $r['elapsed_time'] ?? $r['elapsed'] ?? null;
+      $laps    = $r['Laps'] ?? $r['laps'] ?? $r['laps_norm'] ?? 1;
+      $es = is_numeric($elapsed) ? floatval($elapsed) : srp_time_to_seconds($elapsed);
+      $li = max(1, intval($laps));
+      if ($es !== null && $es > 0) $perlaps[] = $es / $li;
+    }
+    if (count($perlaps) < 5) continue;
+    sort($perlaps);
+    $mid = intdiv(count($perlaps), 2);
+    $median = (count($perlaps) % 2) ? $perlaps[$mid] : (($perlaps[$mid-1] + $perlaps[$mid]) / 2.0);
+    if ($median <= 0) continue;
+
+    foreach ($rows as $i => $r) {
+      $elapsed = $r['Elapsed'] ?? $r['elapsed_time'] ?? $r['elapsed'] ?? null;
+      $laps    = $r['Laps'] ?? $r['laps'] ?? $r['laps_norm'] ?? 1;
+      $es = is_numeric($elapsed) ? floatval($elapsed) : srp_time_to_seconds($elapsed);
+      $li = max(1, intval($laps));
+      if ($es === null || $es <= 0) continue;
+
+      $perlap = $es / $li;
+
+      $reason = '';
+      if ($es >= $abs) {
+        $reason = 'Elapsed very large (' . intval($es) . 's)';
+      } elseif ($perlap >= ($median * $mult)) {
+        $reason = 'Per-lap elapsed ' . round($perlap) . 's is > median ' . round($median) . 's × ' . $mult;
+      }
+
+      if ($reason !== '') {
+        $flags[] = [
+          'post_id' => $post_id,
+          'row_i'   => $i,
+          'raceid'  => (string)$raceid,
+          'racenm'  => (string)$racenm,
+          'start'   => (string)$start,
+          'sail'    => (string)($r['SAIL NUMBER'] ?? $r['sail_number'] ?? $r['Sail Number'] ?? $r['SailNo'] ?? ''),
+          'helm'    => (string)($r['HELM NAME'] ?? $r['help_name'] ?? $r['Helm'] ?? $r['helm'] ?? ''),
+          'crew'    => (string)($r['CREW NAME'] ?? $r['crew_name'] ?? $r['Crew'] ?? $r['crew'] ?? ''),
+          'class'   => (string)($r['CLASS'] ?? $r['class_name'] ?? $r['class'] ?? ''),
+          'laps'    => $li,
+          'elapsed' => $es,
+          'perlap'  => $perlap,
+          'reason'  => $reason,
+        ];
+      }
+    }
+  }
+
+  if (empty($flags)) {
+    echo '<p><strong>No suspicious rows found</strong> using the current thresholds.</p></div>';
+    return;
+  }
+
+  // Output table
+  echo '<table class="widefat striped" style="max-width: 1400px;">';
+  echo '<thead><tr>';
+  echo '<th>Race</th><th>Start</th><th>Sail</th><th>Helm</th><th>Crew</th><th>Class</th><th>Laps</th><th>Elapsed (s)</th><th>Per lap (s)</th><th>Reason</th><th>Fix</th><th>Open</th>';
+  echo '</tr></thead><tbody>';
+
+  $nonce = wp_create_nonce('srp_fix_row');
+  foreach ($flags as $f) {
+    $view_url = admin_url('admin.php?page=srp-race-view&post_id=' . intval($f['post_id']));
+    echo '<tr>';
+    $race_label = trim($f['racenm']) !== '' ? esc_html($f['racenm']) : ('Race ' . esc_html($f['raceid']));
+    echo '<td>' . $race_label . '</td>';
+    echo '<td>' . esc_html(substr((string)$f['start'], 0, 19)) . '</td>';
+    echo '<td>' . esc_html($f['sail']) . '</td>';
+    echo '<td>' . esc_html($f['helm']) . '</td>';
+    echo '<td>' . esc_html($f['crew']) . '</td>';
+    echo '<td>' . esc_html($f['class']) . '</td>';
+    echo '<td>' . esc_html((string)$f['laps']) . '</td>';
+    echo '<td>' . esc_html((string)round($f['elapsed'])) . '</td>';
+    echo '<td>' . esc_html((string)round($f['perlap'])) . '</td>';
+    echo '<td style="max-width:360px;">' . esc_html($f['reason']) . '</td>';
+
+    echo '<td>';
+    echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:flex; gap:6px; align-items:center;">';
+    echo '<input type="hidden" name="action" value="srp_fix_row" />';
+    echo '<input type="hidden" name="_wpnonce" value="'.esc_attr($nonce).'" />';
+    echo '<input type="hidden" name="post_id" value="'.esc_attr($f['post_id']).'" />';
+    echo '<input type="hidden" name="row_i" value="'.esc_attr($f['row_i']).'" />';
+    echo '<input type="number" name="laps" value="'.esc_attr($f['laps']).'" min="1" style="width:70px;" />';
+    echo '<input type="number" name="elapsed" value="'.esc_attr((int)round($f['elapsed'])).'" min="1" style="width:110px;" />';
+    echo '<button class="button">Save</button>';
+    echo '</form>';
+    echo '</td>';
+
+    echo '<td><a class="button" href="'.esc_url($view_url).'" target="_blank">View</a></td>';
+    echo '</tr>';
+  }
+
+  echo '</tbody></table>';
+  echo '</div>';
+}
+
+add_action('admin_post_srp_fix_row', function () {
+  if (!current_user_can('manage_options')) wp_die('Sorry, you are not allowed to do this.');
+  check_admin_referer('srp_fix_row');
+
+  $post_id = isset($_POST['post_id']) ? intval($_POST['post_id']) : 0;
+  $row_i   = isset($_POST['row_i']) ? intval($_POST['row_i']) : -1;
+  $laps    = isset($_POST['laps']) ? max(1, intval($_POST['laps'])) : 1;
+  $elapsed = isset($_POST['elapsed']) ? max(1, floatval($_POST['elapsed'])) : 0;
+
+  if ($post_id <= 0 || $row_i < 0) wp_die('Invalid request.');
+
+  $rows_json = get_post_meta($post_id, 'srp_parsed_rows', true);
+  $rows = $rows_json ? json_decode($rows_json, true) : null;
+  if (!is_array($rows) || !isset($rows[$row_i]) || !is_array($rows[$row_i])) wp_die('Row not found.');
+
+  // Update both canonical + original keys where possible
+  $rows[$row_i]['Laps'] = $laps;
+  $rows[$row_i]['laps'] = $laps;
+  $rows[$row_i]['Elapsed'] = $elapsed;
+  $rows[$row_i]['elapsed_time'] = $elapsed;
+  $rows[$row_i]['elapsed'] = $elapsed;
+
+  // Normalize and recompute derived stats
+  if (function_exists('srp_rya_normalize_rows_for_stats')) {
+    $rows = srp_rya_normalize_rows_for_stats($rows);
+  }
+  $dual = srp_compute_dual($rows, 2.0);
+  // Prefer "all" output for saved rows (matches UI)
+  $rows_out = $dual['all']['rows'] ?? $rows;
+  if (function_exists('srp_ensure_stat_columns')) $rows_out = srp_ensure_stat_columns($rows_out);
+
+  update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($rows_out));
+  // Save class stats (all + best) for the page
+  $class_stats = [
+    'all'  => $dual['all']['class_stats'] ?? [],
+    'best' => $dual['best']['class_stats'] ?? [],
+    'debug'=> $dual['all']['debug'] ?? [],
+  ];
+  update_post_meta($post_id, 'srp_class_stats', wp_json_encode($class_stats));
+
+  wp_safe_redirect(admin_url('admin.php?page=srp-data-qa&updated=1'));
+  exit;
+});
+
