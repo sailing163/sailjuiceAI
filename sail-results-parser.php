@@ -191,8 +191,7 @@ function srp_rya_bulk_import_page() {
 	  	    $ymd = is_string($g['date']) ? $g['date'] : '';
 	  	    if (!preg_match('/^\\d{4}-\\d{2}-\\d{2}$/', $ymd)) continue;
 	  	    if (!isset($tt_candidates[$ymd])) {
-	  	      $iso_dt = $ymd . 'T12:00:00.000Z';
-	  	      $tt_candidates[$ymd] = srp_tt_list_races_by_date($iso_dt, true);
+	  	     srp_tt_list_races_by_date('YYYY-MM-DD')
 	  	    }
 	  	  }
 
