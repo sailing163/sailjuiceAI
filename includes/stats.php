@@ -180,7 +180,7 @@ function srp_compute_allboats(array $rows, $k=2.0){
     $idx=$it['idx'];
     $manual_ex = trim((string)($rows[$idx]['Excluded manual'] ?? $rows[$idx]['Manual Excluded'] ?? ''));
     if (strcasecmp($manual_ex, 'yes') === 0 || $manual_ex === '1' || $manual_ex === 'true') {
-      $updated[$idx]['Excluded (All)'] = 'Yes';
+      $updated[$idx]['Excluded (RYA)'] = 'Yes';
       $updated[$idx]['Excluded'] = 'Yes';
       $updated[$idx]['Derived PY/GL (All)'] = '';
       $updated[$idx]['Derived PY/GL'] = '';
@@ -362,7 +362,155 @@ function srp_compute_bestofclass(array $rows){
 function srp_compute_dual(array $rows, $k=2.0){
   return [
     'all'  => srp_compute_allboats($rows,$k),
-    'best' => srp_compute_bestofclass($rows),
+    // best performer per class, then apply same SD outlier filter on the subset
+    'best' => srp_compute_bestofclass_sd($rows,$k),
+    // RYA median method (top 66%, then within 110% of median)
+    'rya'  => srp_compute_rya_median($rows),
   ];
 }
 
+
+
+// Model 2: choose best corrected-per-lap boat per class, then apply SD outlier filter via allboats method
+function srp_compute_bestofclass_sd(array $rows, $k=2.0){
+  // First, get best-of-class single boats list from existing bestofclass method
+  $best = srp_compute_bestofclass($rows);
+  $subset = $best['rows'] ?? $rows;
+  return srp_compute_allboats($subset, $k);
+}
+
+// Model 3: RYA median methodology:
+// - compute corrected-per-lap using provided PY/GL
+// - take top 66% (fastest) corrected-per-lap to define median
+// - keep results within 110% of that median, then compute SCT + derived PY/GL like allboats
+function srp_compute_rya_median(array $rows){
+  $debug=['method'=>'rya_median'];
+  if (empty($rows)) return ['rows'=>$rows,'class_stats'=>[],'debug'=>$debug];
+
+  $headers = array_keys($rows[0]);
+  $class_col=null; $elapsed_col=null; $laps_col=null; $gl_col=null;
+  foreach ($headers as $h) {
+    if ($class_col===null && preg_match('/\bclass\b/i',$h)) $class_col=$h;
+    if ($elapsed_col===null && preg_match('/\btime\b|\belapsed\b/i',$h)) $elapsed_col=$h;
+    if ($laps_col===null && preg_match('/\blap/i',$h)) $laps_col=$h;
+    if ($gl_col===null && preg_match('/\bgl\b|\bpy\b|handicap/i',$h)) $gl_col=$h;
+  }
+  if ($class_col===null || $elapsed_col===null || $gl_col===null){
+    $debug['error']='Missing required columns.';
+    return ['rows'=>$rows,'class_stats'=>[],'debug'=>$debug];
+  }
+  $items=[];
+  foreach ($rows as $idx=>$r){
+    $manual_ex = trim((string)($r['Excluded manual'] ?? $r['Manual Excluded'] ?? ''));
+    if (strcasecmp($manual_ex,'yes')===0) continue;
+    $elapsed = floatval($r[$elapsed_col] ?? 0);
+    $laps = $laps_col ? max(1.0, floatval($r[$laps_col] ?? 1)) : 1.0;
+    $gl = floatval($r[$gl_col] ?? 0);
+    if ($elapsed<=0 || $gl<=0) continue;
+    $corr_per_lap = ($elapsed * 1000.0 / $gl) / $laps;
+    $items[] = ['idx'=>$idx,'corr'=>$corr_per_lap];
+  }
+  if (empty($items)) return ['rows'=>$rows,'class_stats'=>[],'debug'=>$debug];
+
+  usort($items, fn($a,$b)=> $a['corr'] <=> $b['corr']);
+  $keep_n = max(1, (int)floor(count($items)*0.66));
+  $top = array_slice($items,0,$keep_n);
+  $corrs = array_column($top,'corr');
+  sort($corrs);
+  $median = $corrs[(int)floor((count($corrs)-1)/2)];
+  $limit = $median*1.10;
+  $debug['median']=$median; $debug['limit']=$limit; $debug['top_n']=$keep_n;
+
+  // mark exclusions for rows outside limit (but keep manual excludes)
+  $rows2=$rows;
+  foreach ($items as $it){
+    $idx=$it['idx'];
+    if ($it['corr'] > $limit){
+      $rows2[$idx]['Excluded (All)']='Yes';
+      $rows2[$idx]['Exclusion Reason (All)']='>110% median';
+    }
+  }
+  // Reuse allboats to compute SCT/derived on filtered set (it will respect Excluded flags)
+  return srp_compute_allboats($rows2, 2.0);
+}
+
+function srp_compute_rya_median_v2(array $rows){
+  $debug=['method'=>'rya_median_v2'];
+  if (empty($rows)) return ['rows'=>$rows,'class_stats'=>[],'debug'=>$debug];
+  $headers=array_keys($rows[0]);
+  $class_col=null; $elapsed_col=null; $laps_col=null; $gl_col=null;
+  foreach ($headers as $h){
+    if ($class_col===null && preg_match('/\bclass\b/i',$h)) $class_col=$h;
+    if ($elapsed_col===null && preg_match('/\btime\b|\belapsed\b/i',$h)) $elapsed_col=$h;
+    if ($laps_col===null && preg_match('/\blap/i',$h)) $laps_col=$h;
+    if ($gl_col===null && preg_match('/\bgl\b|\bpy\b|handicap/i',$h)) $gl_col=$h;
+  }
+  if ($class_col===null || $elapsed_col===null || $gl_col===null){
+    $debug['error']='Missing required columns.';
+    return ['rows'=>$rows,'class_stats'=>[],'debug'=>$debug];
+  }
+  $items=[];
+  foreach ($rows as $idx=>$r){
+    $manual_ex = trim((string)($r['Excluded manual'] ?? $r['Manual Excluded'] ?? ''));
+    if (strcasecmp($manual_ex,'yes')===0) continue;
+    $elapsed=floatval($r[$elapsed_col] ?? 0);
+    $laps=$laps_col ? max(1.0, floatval($r[$laps_col] ?? 1)) : 1.0;
+    $gl=floatval($r[$gl_col] ?? 0);
+    if ($elapsed<=0 || $gl<=0) continue;
+    $corr_per_lap = ($elapsed * 1000.0 / $gl) / $laps;
+    $items[]=['idx'=>$idx,'corr'=>$corr_per_lap,'gl'=>$gl,'elapsed'=>$elapsed,'laps'=>$laps,'class'=>(string)$r[$class_col]];
+  }
+  if (empty($items)) return ['rows'=>$rows,'class_stats'=>[],'debug'=>$debug];
+  usort($items, fn($a,$b)=> $a['corr'] <=> $b['corr']);
+  $keep_n=max(1,(int)floor(count($items)*0.66));
+  $top=array_slice($items,0,$keep_n);
+  $corrs=array_column($top,'corr');
+  sort($corrs);
+  $median=$corrs[(int)floor((count($corrs)-1)/2)];
+  $limit=$median*1.10;
+  $debug['median']=$median; $debug['limit']=$limit; $debug['top_n']=$keep_n;
+
+  $rows2=$rows;
+  foreach ($items as $it){
+    if ($it['corr'] > $limit){
+      $rows2[$it['idx']]['Excluded (All)']='Yes';
+      $rows2[$it['idx']]['Exclusion Reason (All)']='>110% median';
+    }
+  }
+
+  $included=[];
+  foreach ($items as $it){ if ($it['corr'] <= $limit) $included[]=$it; }
+  if (empty($included)) return ['rows'=>$rows2,'class_stats'=>[],'debug'=>$debug];
+
+  $sct = array_sum(array_column($included,'corr'))/count($included);
+  $debug['sct']=$sct;
+
+  $class_buckets=[];
+  foreach ($included as $it){ $class_buckets[$it['class']][]=$it; }
+  $class_stats=[];
+  foreach ($class_buckets as $class=>$arr){
+    $vals=[];
+    foreach ($arr as $it){
+      $elapsed_per_lap = $it['elapsed']/$it['laps'];
+      $vals[] = 1000.0 * ($elapsed_per_lap / $sct);
+    }
+    sort($vals);
+    $derived = $vals[(int)floor((count($vals)-1)/2)];
+    $class_stats[$class]=['derived_py'=>$derived,'n'=>count($arr)];
+  }
+  foreach ($rows2 as $idx=>$r){
+    $class=(string)($r[$class_col] ?? '');
+    if ($class!=='' && isset($class_stats[$class]['derived_py'])){
+      $rows2[$idx]['Derived PY/GL (All)'] = (int)round($class_stats[$class]['derived_py']);
+    }
+  }
+  return ['rows'=>$rows2,'class_stats'=>$class_stats,'debug'=>$debug,'sct'=>$sct];
+}
+
+function srp_compute_dual_v2(array $rows, $k=2.0){
+  return [
+    'all'  => srp_compute_allboats($rows,$k),
+    'best' => srp_compute_bestofclass_sd($rows,$k),
+    'rya'  => srp_compute_rya_median_v2($rows),
+  ];
+}

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Sail Results Parser
  * Description: Paste HTML sailing results (WYSIWYG), fetch TackTracker race/course/marks via API, save imports (update by raceid), show race index + race view, and compute SCT/Derived PY/GL excluding outliers.
- * Version: 0.24.7
+ * Version: 0.44.2
  * Author: Simon
  */
 
@@ -255,7 +255,24 @@ function srp_rya_bulk_import_page() {
       echo '</tr>';
     }
 
-    echo '</tbody></table>';
+  
+  $tt_tpl = get_option('srp_tt_viewer_url_tpl', 'https://tacktracker.com/cloud/races/embedlive/%s?namemode=details&leaderboard=true');
+    echo '<tr><th scope="row"><label for="srp_tt_viewer_url_tpl">TackTracker viewer URL</label></th><td>';
+  echo '<input type="text" id="srp_tt_viewer_url_tpl" name="srp_tt_viewer_url_tpl" value="' . esc_attr($tt_tpl) . '" class="regular-text" />';
+  echo '<p class="description">Used for the TT Viewer popup. Use <code>%s</code> where the raceid should go.</p>';
+  echo '</td></tr>';
+  echo '<tr><th scope="row"><label for="srp_flickr_api_key">Flickr API key</label></th><td>';
+  $fkey = get_option('srp_flickr_api_key', '');
+  echo '<input type="text" id="srp_flickr_api_key" name="srp_flickr_api_key" value="' . esc_attr($fkey) . '" class="regular-text" />';
+  echo '<p class="description">Used to search Flickr via API for photos matching the raceid (public search). No OAuth required for searching public photos.</p>';
+  echo '</td></tr>';
+  echo '<tr><th scope="row"><label for="srp_flickr_user_id">Flickr user (optional)</label></th><td>';
+  $fuid = get_option('srp_flickr_user_id', '');
+  echo '<input type="text" id="srp_flickr_user_id" name="srp_flickr_user_id" value="' . esc_attr($fuid) . '" class="regular-text" />';
+  echo '<p class="description">If set, restricts search to this user (e.g. <code>12345678@N00</code>).</p>';
+  echo '</td></tr>';
+
+  echo '</tbody></table>';
 
     echo '<p style="margin-top:12px;"><label><input type="checkbox" name="srp_rya_process_now" value="1" checked> Process races immediately (compute SCT/Derived/Class Stats)</label></p>';
     echo '<p><button class="button button-primary" name="srp_rya_confirm_import" value="1">Create Imports</button> ';
@@ -457,13 +474,24 @@ add_action('init', function () {
 
 add_action('admin_menu', function () {
   add_menu_page('Sailing Results Import','Sailing Results','manage_options','sail-results-parser','srp_admin_page','dashicons-list-view',56);
+
+
+// Data QA (outliers)
+add_submenu_page(
+  'sail-results-parser',
+  'Data QA',
+  'Data QA',
+  'edit_posts',
+  'srp-data-qa',
+  'srp_data_qa_page'
+);
+
   add_submenu_page('sail-results-parser','Race Index','Race Index','manage_options','srp-race-index','srp_race_index_page');
   add_submenu_page('sail-results-parser','Class Stats','Class Stats','manage_options','srp-class-stats','srp_class_stats_page');
   add_submenu_page('sail-results-parser','RYA Bulk Import','RYA Bulk Import','manage_options','srp-rya-bulk-import','srp_rya_bulk_import_page');
   add_submenu_page(null,'Race View','Race View','manage_options','srp-race-view','srp_race_view_page');
   add_submenu_page('sail-results-parser','Sailing Imports','Sailing Imports','manage_options','edit.php?post_type=srp_import');
   add_submenu_page('sail-results-parser','Settings','Settings','manage_options','srp-settings','srp_settings_page');
-  add_submenu_page('sail-results-parser','Data QA','Data QA','manage_options','srp-data-qa','srp_data_qa_page');
 });
 
 add_action('admin_init', function () {
@@ -471,13 +499,265 @@ add_action('admin_init', function () {
   register_setting('srp_settings', 'srp_outlier_k', ['type' => 'number', 'sanitize_callback' => 'floatval', 'default' => 2.0]);
   // Maps are enabled by default; can be disabled if performance is an issue.
   register_setting('srp_settings', 'srp_enable_map', ['type' => 'string', 'sanitize_callback' => 'sanitize_text_field', 'default' => '1']);
+
+  register_setting('srp_settings', 'srp_tt_viewer_url_tpl', ['type' => 'string', 'sanitize_callback' => 'sanitize_text_field']);
+  register_setting('srp_settings', 'srp_flickr_api_key', ['type' => 'string', 'sanitize_callback' => 'sanitize_text_field']);
+  register_setting('srp_settings', 'srp_flickr_user_id', ['type' => 'string', 'sanitize_callback' => 'sanitize_text_field']);
+});
+
+
+/**
+ * Admin modal + helpers
+ */
+function srp_tt_viewer_url($raceid){
+  $tpl = get_option('srp_tt_viewer_url_tpl', 'https://tacktracker.com/cloud/races/embedlive/%s?namemode=details&leaderboard=true');
+  return sprintf($tpl, rawurlencode((string)$raceid));
+}
+function srp_flickr_api_key(){
+  return (string)get_option('srp_flickr_api_key', '');
+}
+function srp_flickr_user_id(){
+  return (string)get_option('srp_flickr_user_id', '');
+}
+function srp_flickr_is_enabled(){
+  return srp_flickr_api_key() !== '';
+}
+function srp_weather_icon_html($wind_raw, $dir_raw){
+  $wind = trim((string)$wind_raw);
+  $dir = trim((string)$dir_raw);
+  if($wind==='' && $dir==='') return '';
+  // Parse wind number (knots)
+  $wind_num = null;
+  if(preg_match('/([0-9]+(?:\.[0-9]+)?)/', $wind, $m)) $wind_num = (float)$m[1];
+  $label = $wind_num!==null ? (string)round($wind_num) : $wind;
+  if($label!=='') $label .= 'kt';
+  $deg = is_numeric($dir) ? (float)$dir : null;
+  $rot = $deg!==null ? $deg : 0.0;
+  // Simple SVG: circle + arrow
+  $svg = '<svg class="srp-wind-svg" width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">'
+       . '<circle cx="14" cy="14" r="12" fill="none" stroke="currentColor" stroke-width="1"/>'
+       . '<g transform="translate(14 14) rotate(' . esc_attr($rot) . ')">'
+       . '<path d="M0 -10 L3 -3 L1 -3 L1 10 L-1 10 L-1 -3 L-3 -3 Z" fill="currentColor"/>'
+       . '</g></svg>';
+  return '<span class="srp-wind" title="' . esc_attr($wind . ' ' . $dir) . '">' . $svg . '<span class="srp-wind-label">' . esc_html($label) . '</span></span>';
+}
+
+add_action('admin_enqueue_scripts', function($hook){
+  // Only load on our plugin pages
+  $page = isset($_GET['page']) ? sanitize_key((string)$_GET['page']) : '';
+  if(strpos($page, 'srp-') !== 0) return;
+
+  wp_add_inline_style('wp-admin', '
+    .srp-modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100000;display:none;}
+    .srp-modal{position:fixed;inset:5% 5%;background:#fff;z-index:100001;display:none;border-radius:6px;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.35);}
+    .srp-modal header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:#f6f7f7;border-bottom:1px solid #dcdcde;}
+    .srp-modal header h3{margin:0;font-size:14px;}
+    .srp-modal .srp-modal-close{background:transparent;border:0;font-size:18px;line-height:1;cursor:pointer;}
+    .srp-modal iframe{width:100%;height:100%;border:0;}
+    .srp-modal .srp-modal-body{height:calc(100% - 44px);}
+    .srp-modal-btn{margin-right:8px;}
+    .srp-wind{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;}
+    .srp-wind-svg{display:block;}
+    .srp-wind-label{font-size:12px;}
+  ');
+
+  wp_add_inline_script('jquery-core', '
+    (function(){
+      function ensureModal(){
+        if(document.getElementById("srpModal")) return;
+        var bd=document.createElement("div"); bd.id="srpModalBackdrop"; bd.className="srp-modal-backdrop";
+        var m=document.createElement("div"); m.id="srpModal"; m.className="srp-modal";
+        m.innerHTML = "<header><h3 id=\"srpModalTitle\">Viewer</h3><button type=\"button\" class=\"srp-modal-close\" aria-label=\"Close\">×</button></header><div class=\"srp-modal-body\"><div id=\"srpModalGallery\" style=\"display:none; padding:12px; overflow:auto; height:100%;\"></div><iframe id=\"srpModalFrame\" src=\"about:blank\" loading=\"lazy\"></iframe></div>";
+        document.body.appendChild(bd); document.body.appendChild(m);
+        function close(){ bd.style.display="none"; m.style.display="none"; document.getElementById("srpModalFrame").style.display="block"; document.getElementById("srpModalFrame").src="about:blank"; var g=document.getElementById("srpModalGallery"); if(g){ g.style.display="none"; g.innerHTML=""; } }
+        bd.addEventListener("click", close);
+        m.querySelector(".srp-modal-close").addEventListener("click", close);
+        window.srpOpenModal=function(url,title){
+          ensureModal(); bd.style.display="block"; m.style.display="block";
+          document.getElementById("srpModalTitle").textContent=title||"Viewer";
+          var frame=document.getElementById("srpModalFrame");
+          var gal=document.getElementById("srpModalGallery");
+          if(gal){ gal.style.display="none"; gal.innerHTML=""; }
+          frame.style.display="block";
+          frame.src=url;
+        };
+        window.srpOpenGallery=function(title, html){
+          ensureModal(); bd.style.display="block"; m.style.display="block";
+          document.getElementById("srpModalTitle").textContent=title||"Viewer";
+          var frame=document.getElementById("srpModalFrame");
+          var gal=document.getElementById("srpModalGallery");
+          frame.style.display="none"; frame.src="about:blank";
+          if(gal){ gal.style.display="block"; gal.innerHTML=html; }
+        };
+      }
+      ensureModal();
+      document.addEventListener("click", function(e){
+        var a = e.target.closest("[data-srp-modal-url]");
+        if(!a) return;
+        e.preventDefault();
+        var url=a.getAttribute("data-srp-modal-url");
+        var title=a.getAttribute("data-srp-modal-title")||"Viewer";
+        // Mobile: hide TackTracker leaderboard if present
+        try {
+          if (window.innerWidth && window.innerWidth < 700 && url && url.indexOf("leaderboard=true") !== -1) {
+            url = url.replace("leaderboard=true", "leaderboard=false");
+          }
+        } catch(e) {}
+        if(window.srpOpenModal) window.srpOpenModal(url,title);
+      });
+      // Flickr API modal (admin AJAX)
+      document.addEventListener("click", function(e){
+        var b = e.target.closest("[data-srp-flickr-raceid]");
+        if(!b) return;
+        e.preventDefault();
+        var raceid = b.getAttribute("data-srp-flickr-raceid");
+        var title = b.getAttribute("data-srp-modal-title") || ("Flickr: " + raceid);
+        if(!window.srpOpenGallery) return;
+        window.srpOpenGallery(title, "<p>Loading…</p>");
+        var fd = new FormData();
+        fd.append("action","srp_flickr_search");
+        fd.append("raceid", raceid);
+        if(postId) fd.append("post_id", postId);
+        if(raceStart) fd.append("race_start", raceStart);
+        fetch(ajaxurl, {method:"POST", credentials:"same-origin", body: fd})
+          .then(r=>r.json())
+          .then(function(data){
+            if(!data || !data.success){ throw new Error((data && data.data && data.data.message) ? data.data.message : "Search failed"); }
+            var photos = data.data.photos || [];
+            if(!photos.length){
+              window.srpOpenGallery(title, "<p>No Flickr photos found for <code>"+raceid+"</code>.</p>");
+              return;
+            }
+            var html = "<div style=\"display:flex;flex-wrap:wrap;gap:10px;\">";
+            photos.forEach(function(p){
+              html += "<a href=\""+p.page+"\" target=\"_blank\" style=\"text-decoration:none;\"><img src=\""+p.thumb+"\" alt=\"\" style=\"width:150px;height:150px;object-fit:cover;border:1px solid #ddd;border-radius:4px;\" /></a>";
+            });
+            html += "</div><p style=\"margin-top:10px;\"><em>Click a photo to open on Flickr.</em></p>";
+            window.srpOpenGallery(title, html);
+            // Bind thumbnail clicks to open full image in same modal
+            setTimeout(function(){
+              document.querySelectorAll(".srp-flickr-thumb").forEach(function(a){
+                a.addEventListener("click", function(ev){
+                  ev.preventDefault();
+                  var full = a.getAttribute("data-full") || "";
+                  if(!full) return;
+                  window.srpOpenGallery(title, "<div style=\"text-align:center\"><img src=\""+full+"\" style=\"max-width:100%;height:auto\"></div>");
+                });
+              });
+            }, 0);
+
+          })
+          .catch(function(err){
+            window.srpOpenGallery(title, "<p style=\"color:#b32d2e;\">"+(err && err.message ? err.message : "Error")+"</p>");
+          });
+      });
+
+    })();
+  ');
 });
 
 // AJAX handlers (admin)
 add_action('wp_ajax_srp_save_row_edit', 'srp_ajax_save_row_edit');
 
+
+add_action('wp_ajax_srp_flickr_search', 'srp_ajax_flickr_search');
+
+function srp_ajax_flickr_search(){
+  if (!current_user_can('edit_posts')) {
+    wp_send_json_error(['message' => 'Not allowed'], 403);
+  }
+  $post_id = isset($_POST['post_id']) ? intval($_POST['post_id']) : 0;
+  $raceid = isset($_POST['raceid']) ? sanitize_text_field(wp_unslash($_POST['raceid'])) : '';
+  $start_iso = isset($_POST['start']) ? sanitize_text_field(wp_unslash($_POST['start'])) : '';
+
+  $api_key = srp_flickr_api_key();
+  if ($api_key === '') wp_send_json_error(['message' => 'Flickr API key not set (Settings)'], 400);
+
+  $user_id = srp_flickr_user_id();
+  if ($user_id === '') wp_send_json_error(['message' => 'Flickr user id required for account-only search (Settings)'], 400);
+
+  if ($start_iso === '' && $post_id > 0) {
+    $start_iso = (string)get_post_meta($post_id,'srp_race_start',true);
+  }
+  if (($start_iso === '' || !strtotime($start_iso)) && $post_id > 0 && $raceid !== '') {
+    $tt = srp_tt_get_race_details_cached($post_id, $raceid);
+    if (is_array($tt)) {
+      $start_iso = (string)($tt['startDateTime'] ?? $tt['start'] ?? $start_iso);
+    }
+  }
+  $start_ts = $start_iso ? strtotime($start_iso) : 0;
+  if (!$start_ts) {
+    wp_send_json_error(['message' => 'Missing/invalid race start time'], 400);
+  }
+
+  $query_min = gmdate('Y-m-d H:i:s', $start_ts - 900); // 15 min before start
+  $query_max = gmdate('Y-m-d H:i:s', $start_ts + 3600); // 1 hour after start
+
+  $args = [
+    'method' => 'flickr.photos.search',
+    'api_key' => $api_key,
+    'user_id' => $user_id,
+    'per_page' => 200,
+    'page' => 1,
+    'sort' => 'date-taken-asc',
+    'safe_search' => 1,
+    'content_type' => 1,
+    'media' => 'photos',
+    'format' => 'json',
+    'nojsoncallback' => 1,
+    'min_taken_date' => $query_min,
+    'max_taken_date' => $query_max,
+    'extras' => 'date_taken,owner_name,url_q,url_c,url_l,url_o',
+  ];
+  if ($raceid !== '') $args['text'] = $raceid;
+
+  $url = add_query_arg($args, 'https://api.flickr.com/services/rest/');
+  $resp = wp_remote_get($url, ['timeout' => 20]);
+  if (is_wp_error($resp)) wp_send_json_error(['message' => $resp->get_error_message(), 'url'=>$url], 500);
+  $code = wp_remote_retrieve_response_code($resp);
+  $body = wp_remote_retrieve_body($resp);
+  if ($code < 200 || $code >= 300) wp_send_json_error(['message' => 'Flickr HTTP ' . $code, 'url'=>$url], 500);
+
+  $data = json_decode($body, true);
+  $list = (is_array($data) && !empty($data['photos']['photo']) && is_array($data['photos']['photo'])) ? $data['photos']['photo'] : [];
+  if (empty($list)) wp_send_json_success(['photos' => [], 'url'=>$url]);
+
+  $within_start = $start_ts;
+  $within_end = $start_ts + 3600;
+
+  $photos = [];
+  foreach ($list as $p) {
+    if (empty($p['id'])) continue;
+    $id = (string)$p['id'];
+    $thumb = $p['url_q'] ?? '';
+    $med = $p['url_c'] ?? ($p['url_l'] ?? ($p['url_o'] ?? ''));
+    if ($thumb === '' && !empty($p['secret']) && !empty($p['server'])) {
+      $thumb = 'https://live.staticflickr.com/' . rawurlencode($p['server']) . '/' . rawurlencode($id) . '_' . rawurlencode($p['secret']) . '_q.jpg';
+    }
+    $taken = (string)($p['datetaken'] ?? '');
+    $taken_ts = $taken ? strtotime($taken.' UTC') : 0;
+    $bucket = ($taken_ts && $taken_ts >= $within_start && $taken_ts <= $within_end) ? 0 : 1;
+    $photos[] = [
+      'id' => $id,
+      'thumb' => $thumb,
+      'image' => $med !== '' ? $med : $thumb,
+      'title' => (string)($p['title'] ?? ''),
+      'date_taken' => $taken,
+      'bucket' => $bucket,
+    ];
+  }
+  usort($photos, function($a,$b){
+    if ($a['bucket'] !== $b['bucket']) return $a['bucket'] <=> $b['bucket'];
+    return strcmp((string)$a['date_taken'], (string)$b['date_taken']);
+  });
+
+  wp_send_json_success(['photos' => $photos, 'url'=>$url]);
+}
+
+
+
 function srp_settings_page() {
-  if (!current_user_can('edit_posts')) return;
+  if (!current_user_can('manage_options')) return;
   echo '<div class="wrap"><h1>Sail Results Parser Settings</h1><form method="post" action="options.php">';
   settings_fields('srp_settings');
   $api_key = get_option('srp_tt_api_key', '');
@@ -496,6 +776,25 @@ function srp_settings_page() {
   echo '<label><input type="checkbox" name="srp_enable_map" value="1" ' . checked(true, $enable_map, false) . ' /> Show Leaflet course maps on race view</label>';
   echo '<p class="description">Disable this if the admin race view feels slow. You can still view results and stats.</p>';
   echo '</td></tr>';
+  
+  $tt_tpl = get_option('srp_tt_viewer_url_tpl', 'https://tacktracker.com/cloud/races/embedlive/%s?namemode=details&leaderboard=true');
+  $flickr_key = get_option('srp_flickr_api_key', '');
+  $flickr_user = get_option('srp_flickr_user_id', '');
+  echo '<tr><th scope="row"><label for="srp_tt_viewer_url_tpl">TackTracker viewer URL template</label></th><td>';
+  echo '<input type="text" id="srp_tt_viewer_url_tpl" name="srp_tt_viewer_url_tpl" value="' . esc_attr($tt_tpl) . '" class="large-text" />';
+  echo '<p class="description">Use <code>%s</code> as placeholder for <code>raceid</code>. Example: <code>https://tacktracker.com/cloud/races/embedlive/%s?namemode=details&leaderboard=true</code>. On mobile we automatically flip <code>leaderboard=true</code> to <code>false</code>.</p>';
+  echo '</td></tr>';
+
+  echo '<tr><th scope="row"><label for="srp_flickr_api_key">Flickr API key</label></th><td>';
+  echo '<input type="text" id="srp_flickr_api_key" name="srp_flickr_api_key" value="' . esc_attr($flickr_key) . '" class="regular-text" />';
+  echo '<p class="description">Required for the Flickr popup gallery (Flickr API).</p>';
+  echo '</td></tr>';
+
+  echo '<tr><th scope="row"><label for="srp_flickr_user_id">Flickr user id</label></th><td>';
+  echo '<input type="text" id="srp_flickr_user_id" name="srp_flickr_user_id" value="' . esc_attr($flickr_user) . '" class="regular-text" placeholder="e.g. 12345678@N00" />';
+  echo '<p class="description">Account-only search. Get it from your Flickr profile URL or the Flickr API.</p>';
+  echo '</td></tr>';
+
   echo '</tbody></table>';
   submit_button('Save Settings');
   echo '</form></div>';
@@ -519,7 +818,7 @@ add_shortcode('sail_results_import', function($atts) {
 });
 
 function srp_admin_page() {
-  if (!current_user_can('edit_posts')) return;
+  if (!current_user_can('manage_options')) return;
   echo '<div class="wrap"><h1>Sailing Results Import</h1>';
   echo '<p>Save will <strong>update</strong> the existing record if the TT raceid already exists.</p>';
   srp_render_import_ui(['context'=>'admin','show_debug'=>true,'show_map'=>true]);
@@ -527,10 +826,10 @@ function srp_admin_page() {
 }
 
 function srp_race_index_page() {
-  if (!current_user_can('edit_posts')) return;
+  if (!current_user_can('manage_options')) return;
   $imports = get_posts(['post_type'=>'srp_import','post_status'=>['private'],'numberposts'=>2000,'orderby'=>'modified','order'=>'DESC']);
-  echo '<div class="wrap"><h1>Race Index</h1><p>Saved imports list (search + sort). Click a race to open it.</p><style>#srp_race_index thead th{position:sticky;top:32px;background:#fff;z-index:5;}#srp_race_index{border-collapse:separate;}</style><div id="srp_race_index_filters" style="margin:12px 0; display:flex; gap:12px; align-items:center; flex-wrap:wrap;"><label>Start from <input type="date" id="srp_start_from" /></label><label>to <input type="date" id="srp_start_to" /></label><button type="button" class="button" id="srp_clear_dates">Clear</button></div>';
-  echo '<table id="srp_race_index" class="widefat striped"><thead><tr><th>Race ID</th><th>Race Name</th><th>Start</th><th>Updated</th><th>Has Course</th><th>Has Marks</th><th>Rows</th><th>Actions</th></tr></thead><tbody>';
+  echo '<div class="wrap"><h1>Race Index</h1><p>Saved imports list (search + sort). Click a race to open it.</p>';
+  echo '<table id="srp_race_index" class="widefat striped"><thead><tr><th>Race ID</th><th>Race Name</th><th>Start</th><th>Updated</th><th>Has Course</th><th>Has Marks</th><th>Rows</th><th>Weather</th><th>Actions</th></tr></thead><tbody>';
   foreach($imports as $p){
     $raceid=get_post_meta($p->ID,'srp_raceid',true);
     $racename=get_post_meta($p->ID,'srp_race_name',true);
@@ -543,42 +842,28 @@ function srp_race_index_page() {
     $has_course=($course&&$course!=='null')?'Yes':'No';
     $has_marks=($marks&&$marks!=='null')?'Yes':'No';
     $view=admin_url('admin.php?page=srp-race-view&post_id='.intval($p->ID));
-        $del = wp_nonce_url(admin_url('admin-post.php?action=srp_delete_import&post_id='.intval($p->ID)), 'srp_delete_import_'.$p->ID);
-    $ovr = wp_nonce_url(admin_url('admin-post.php?action=srp_overwrite_import&post_id='.intval($p->ID)), 'srp_overwrite_import_'.$p->ID);
-    $actions = '<a class="button button-small" href="'.esc_url($view).'">View</a> ';
-    $actions .= '<a class="button button-small" href="'.esc_url($ovr).'">Overwrite</a> ';
-    $actions .= '<a class="button button-small" style="color:#b32d2e;border-color:#b32d2e;" href="'.esc_url($del).'" onclick="return confirm(\'Delete this race import?\');">Delete</a>';
-    echo '<tr><td><a href="'.esc_url($view).'">'.esc_html($raceid).'</a></td><td>'.esc_html($racename).'</td><td>'.esc_html($start).'</td><td>'.esc_html(get_the_modified_date('Y-m-d H:i',$p)).'</td><td>'.esc_html($has_course).'</td><td>'.esc_html($has_marks).'</td><td>'.esc_html($rows_n).'</td><td>'.$actions.'</td></tr>';
+    $wind=get_post_meta($p->ID,'srp_weather_wind',true);
+    $dir=get_post_meta($p->ID,'srp_weather_dir',true);
+    $weather=srp_weather_icon_html($wind,$dir);
+    $tt=srp_tt_viewer_url($raceid);
+    echo '<tr>'
+      . '<td><a href="'.esc_url($view).'">'.esc_html($raceid).'</a></td>'
+      . '<td>'.esc_html($racename).'</td>'
+      . '<td>'.esc_html($start).'</td>'
+      . '<td>'.esc_html(get_the_modified_date('Y-m-d H:i',$p)).'</td>'
+      . '<td>'.esc_html($has_course).'</td>'
+      . '<td>'.esc_html($has_marks).'</td>'
+      . '<td>'.esc_html($rows_n).'</td>'
+      . '<td>'.$weather.'</td>'
+      . '<td>'
+        . '<a class="button button-small" href="'.esc_url($view).'">View</a> '
+        . '<a class="button button-small" href="#" data-srp-modal-url="'.esc_url($tt).'" data-srp-modal-title="TackTracker Viewer">TT</a> '
+        . '<a class="button button-small" href="#" data-srp-flickr-raceid="'.esc_attr($raceid).'" data-srp-post-id="'.esc_attr($post_id).'" data-srp-race-start="'.esc_attr($race_start_iso).'" data-srp-modal-title="Flickr">Flickr</a>'
+      . '</td>'
+    . '</tr>';
+
   }
-  echo '</tbody></table><script>jQuery(function($){
-  if(!$.fn.DataTable) return;
-  // Date range filter on Start column (index 2).
-  $.fn.dataTable.ext.search.push(function(settings, data){
-    if(settings.nTable && settings.nTable.id !== "srp_race_index") return true;
-    var min = $("#srp_start_from").val();
-    var max = $("#srp_start_to").val();
-    var start = (data[2] || "").toString();
-    var d = start.length >= 10 ? start.substring(0,10) : "";
-    if(!min && !max) return true;
-    if(!d) return false;
-    if(min && d < min) return false;
-    if(max && d > max) return false;
-    return true;
-  });
-  var dt = $("#srp_race_index").DataTable({
-    pageLength: 100,
-    lengthMenu: [[25,50,100,200,-1],[25,50,100,200,"All"]],
-    order: [[2,"desc"]],
-    autoWidth: false,
-    fixedHeader: true
-  });
-  function redraw(){ dt.draw(false); dt.columns.adjust(); }
-  $("#srp_start_from,#srp_start_to").on("change", redraw);
-  $("#srp_clear_dates").on("click", function(){ $("#srp_start_from").val(""); $("#srp_start_to").val(""); redraw(); });
-  // Adjust headers after initial render.
-  setTimeout(function(){ dt.columns.adjust(); }, 0);
-  $(window).on("resize", function(){ dt.columns.adjust(); });
-});</script></div>';
+  echo '</tbody></table><script>jQuery(function($){ if($.fn.DataTable) $("#srp_race_index").DataTable({pageLength:100,order:[[2,"desc"]],fixedHeader:true});});</script></div>';
 }
 
 
@@ -587,7 +872,7 @@ function srp_race_index_page() {
 
 
 function srp_class_stats_page() {
-  if (!current_user_can('edit_posts')) return;
+  if (!current_user_can('manage_options')) return;
 
   // Filters
   $filter_class = isset($_GET['srp_class']) ? sanitize_text_field((string)$_GET['srp_class']) : '';
@@ -777,7 +1062,7 @@ function srp_class_stats_page() {
 function srp_race_view_page() {
   $class_stats = [];
   $calc_debug = null;
-  if (!current_user_can('edit_posts')) return;
+  if (!current_user_can('manage_options')) return;
   $post_id=isset($_GET['post_id'])?intval($_GET['post_id']):0;
   if(!$post_id||get_post_type($post_id)!=='srp_import'){ echo '<div class="wrap"><h1>Race View</h1><p><em>Invalid race.</em></p></div>'; return; }
 
@@ -825,9 +1110,13 @@ function srp_race_view_page() {
         echo '<div class="notice notice-error"><p>' . esc_html('No saved rows to recalculate.') . '</p></div>';
       } else {
         $k = floatval(get_option('srp_outlier_k', 2.0));
-        $stats_result = srp_compute_dual($saved_rows, $k);
+        
+$stats_dual = (function_exists('srp_compute_dual_v2') ? srp_compute_dual_v2($saved_rows, $k) : srp_compute_dual($saved_rows, $k));
+update_post_meta($post_id, 'srp_analysis_dual', wp_json_encode($stats_dual));
+$stats_result = isset($stats_dual['all']) ? $stats_dual['all'] : $stats_dual;
 
-        if (!empty($stats_result['rows'])) update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($stats_result['rows']));
+if (!empty($stats_result['rows']))
+ update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($stats_result['rows']));
         if (!empty($stats_result['class_stats'])) {
           srp_upsert_class_stats($stats_result['class_stats']);
           update_post_meta($post_id, 'srp_class_stats', wp_json_encode($stats_result['class_stats']));
@@ -878,11 +1167,20 @@ function srp_race_view_page() {
   echo '<h2>'.esc_html($racename?$racename:('TT Race '.$raceid)).'</h2>';
   if(is_array($race_details)){
     $start=$race_details['startDateTime']??'';
+    $race_start_iso = $start;
     $event=$race_details['eventType']??'';
     echo '<p><strong>Race ID:</strong> '.esc_html($raceid).'<br/>';
     if($start) echo '<strong>Start:</strong> '.esc_html($start).'<br/>';
     if($event) echo '<strong>Event Type:</strong> '.esc_html($event).'<br/>';
     echo '</p>';
+
+    $tt_url = srp_tt_viewer_url($raceid);
+    $flickr_enabled = srp_flickr_is_enabled();
+    echo '<p style="margin-top:6px;">'
+      . '<a class="button srp-modal-btn" href="#" data-srp-modal-url="' . esc_url($tt_url) . '" data-srp-modal-title="TackTracker Viewer">TT Viewer</a>'
+      . ($flickr_enabled ? '<a class="button srp-modal-btn" href="#" data-srp-flickr-raceid="' . esc_attr($raceid) . '" data-srp-modal-title="Flickr">Flickr</a>' : '<span class="button disabled" title="Set Flickr API key in Settings">Flickr</span>')
+      . '</p>';
+
   }
 
   // Weather block (editable)
@@ -1128,127 +1426,62 @@ echo "<script>{$srp_js}</script>";
   } else echo '<p><em>No class stats saved for this race yet.</em></p>';
 
   echo '<h2>Imported Results</h2>';
-  $view = isset($_GET['view']) ? sanitize_text_field(wp_unslash($_GET['view'])) : '';
-  if ($view !== 'raw') $view = 'rya';
-  $base_url = admin_url('admin.php?page=srp-race-view&post_id='.(int)$post_id);
-  echo '<p style="margin:6px 0 12px 0;">'
-    .'<a class="button '.($view==='rya'?'button-primary':'').'" href="'.esc_url($base_url.'&view=rya').'">RYA view</a> '
-    .'<a class="button '.($view==='raw'?'button-primary':'').'" href="'.esc_url($base_url.'&view=raw').'">Raw view</a>'
-    .'</p>';
-  if (is_array($rows) && !empty($rows)) {
-    if ($view === 'raw') {
-      $headers = array_keys($rows[0]);
-      // Hide legacy derived columns from older saves
-      $headers = array_values(array_filter($headers, function($h){ return !in_array($h, ['Derived PY','Derived GL'], true); }));
+  if(is_array($rows)&&!empty($rows)){
+    $headers=array_keys($rows[0]);
+    // Hide legacy derived columns from older saves
+    $headers = array_values(array_filter($headers, function($h){ return !in_array($h, ['Derived PY','Derived GL'], true); }));
 
-      // Ensure a manual exclusion column exists.
-      if (!in_array('Excluded manual', $headers, true)) {
-        $headers[] = 'Excluded manual';
-      }
-      // Add per-row actions
-      $headers[] = 'Actions';
-
-      $editable = ['Finish','Elapsed','Laps','GL','Corrected'];
-
-      echo '<table id="srp_race_rows" class="widefat striped"><thead><tr>';
-      foreach ($headers as $h) echo '<th>' . esc_html($h) . '</th>';
-      echo '</tr></thead><tbody>';
-      foreach ($rows as $idx => $r) {
-        $is_ex = ((isset($r['Excluded']) && $r['Excluded']==='Yes') || (isset($r['Excluded (All)']) && $r['Excluded (All)']==='Yes'));
-        $tr_class = ($is_ex ? ' class="srp-excluded-row"' : '');
-        echo '<tr data-row-idx="' . (int)$idx . '"' . $tr_class . '>';
-        foreach ($headers as $h) {
-          if ($h === 'Actions') {
-            echo '<td><button type="button" class="button button-primary srp-row-save" disabled>Save</button></td>';
-          } elseif ($h === 'Excluded manual') {
-            $val = (string)($r['Excluded manual'] ?? 'No');
-            $checked = (strcasecmp($val,'yes')===0) ? 'checked' : '';
-            echo '<td style="text-align:center"><input type="checkbox" class="srp-manual-ex" ' . $checked . ' /></td>';
-          } elseif (in_array($h, $editable, true)) {
-            $cell = (string)($r[$h] ?? '');
-            echo '<td><input type="text" class="srp-edit" data-field="' . esc_attr($h) . '" value="' . esc_attr($cell) . '" style="width:100%" /></td>';
-          } else {
-            echo '<td>' . esc_html($r[$h] ?? '') . '</td>';
-          }
-        }
-        echo '</tr>';
-      }
-      echo '</tbody></table>';
-    } else {
-      // RYA condensed view
-      $headers = ['RANK','SAIL NUMBER','HELM NAME','CREW NAME','CLASS','CONFIG.','PY','ACHIEVED PY','LAPS','ELAPSED','CORR.','PY DIFF.','Excluded manual','Actions'];
-
-      echo '<table id="srp_race_rows" class="widefat striped"><thead><tr>';
-      foreach ($headers as $h) echo '<th>' . esc_html($h) . '</th>';
-      echo '</tr></thead><tbody>';
-
-      foreach ($rows as $idx => $r) {
-        $rank = $r['rank'] ?? $r['RANK'] ?? '';
-        $sail = $r['sail_number'] ?? $r['SAIL NUMBER'] ?? $r['sailno'] ?? '';
-        $helm = $r['help_name'] ?? $r['helm_name'] ?? $r['HELM NAME'] ?? $r['helm'] ?? '';
-        $crew = $r['crew_name'] ?? $r['CREW NAME'] ?? $r['crew'] ?? '';
-        $class = $r['class_name'] ?? $r['class'] ?? $r['CLASS'] ?? '';
-        $persons = $r['class_persons'] ?? $r['persons'] ?? '';
-        $rig = $r['class_rig'] ?? $r['rig'] ?? '';
-        $spin = $r['class_spinnaker'] ?? $r['spinnaker'] ?? '';
-        $config = trim((string)$persons) . '|' . trim((string)$rig) . '|' . trim((string)$spin);
-        $py = $r['GL'] ?? $r['rating'] ?? $r['PY'] ?? '';
-        $ach = $r['Derived PY/GL (All)'] ?? $r['Derived PY/GL'] ?? $r['ACHIEVED PY'] ?? '';
-        $laps = $r['Laps'] ?? $r['laps'] ?? $r['laps_norm'] ?? '';
-        $elapsed = $r['Elapsed'] ?? $r['elapsed_time'] ?? $r['elapsed'] ?? '';
-
-        $py_f = is_numeric($py) ? (float)$py : 0.0;
-        $laps_i = is_numeric($laps) ? max(1, (int)$laps) : 1;
-        $elapsed_f = is_numeric($elapsed) ? (float)$elapsed : 0.0;
-
-        // Corrected per lap
-        $corr = '';
-        if ($py_f > 0 && $elapsed_f > 0) {
-          $corr = (int)round((($elapsed_f / $laps_i) * 1000.0) / $py_f);
-        }
-
-        $ach_f = is_numeric($ach) ? (float)$ach : null;
-        $pydiff = ($ach_f !== null && $py_f > 0) ? (int)round($py_f - $ach_f) : '';
-
-        $manual = (string)($r['Excluded manual'] ?? 'No');
-        $checked = (strcasecmp($manual,'yes')===0) ? 'checked' : '';
-
-        echo '<tr data-row-idx="' . (int)$idx . '">';
-        echo '<td>' . esc_html($rank) . '</td>';
-        echo '<td>' . esc_html($sail) . '</td>';
-        echo '<td>' . esc_html($helm) . '</td>';
-        echo '<td>' . esc_html($crew) . '</td>';
-        echo '<td>' . esc_html($class) . '</td>';
-        echo '<td>' . esc_html($config) . '</td>';
-
-        // Editable fields
-        echo '<td><input class="srp-edit" data-field="GL" value="' . esc_attr($py) . '" style="width:90px" /></td>';
-        echo '<td>' . esc_html($ach) . '</td>';
-        echo '<td><input class="srp-edit" data-field="Laps" value="' . esc_attr($laps) . '" style="width:70px" /></td>';
-        echo '<td><input class="srp-edit" data-field="Elapsed" value="' . esc_attr($elapsed) . '" style="width:90px" /></td>';
-        echo '<td>' . esc_html($corr) . '</td>';
-        echo '<td>' . esc_html($pydiff) . '</td>';
-
-        echo '<td style="text-align:center"><input type="checkbox" class="srp-manual-ex" ' . $checked . ' /></td>';
-        echo '<td><button type="button" class="button button-primary srp-row-save" disabled>Save</button></td>';
-        echo '</tr>';
-      }
-
-      echo '</tbody></table>';
+    // Ensure a manual exclusion column exists.
+    if (!in_array('Excluded manual', $headers, true)) {
+      $headers[] = 'Excluded manual';
     }
+    // Add per-row actions
+    $headers[] = 'Actions';
 
+    $editable = ['Finish','Elapsed','Laps','GL','Corrected'];
+
+    echo '<table id="srp_race_rows" class="widefat striped"><thead><tr>';
+    foreach($headers as $h) echo '<th>'.esc_html($h).'</th>';
+    echo '</tr></thead><tbody>';
+    foreach($rows as $idx=>$r){
+      $is_ex = ((isset($r['Excluded']) && $r['Excluded']==='Yes') || (isset($r['Excluded (All)']) && $r['Excluded (All)']==='Yes'));
+      $tr_class = ($is_ex ? ' class="srp-excluded-row"' : '');
+      echo '<tr data-row-idx="'.(int)$idx.'"'.$tr_class.'>';
+      foreach($headers as $h){
+        if($h==='Actions'){
+          echo '<td><button type="button" class="button button-primary srp-row-save" disabled>Save</button></td>';
+        }elseif($h==='Excluded manual'){
+          $val = (string)($r['Excluded manual'] ?? 'No');
+          $checked = (strcasecmp($val,'yes')===0) ? 'checked' : '';
+          echo '<td style="text-align:center"><input type="checkbox" class="srp-manual-ex" '.$checked.' /></td>';
+        }elseif(in_array($h,$editable,true)){
+          $cell=(string)($r[$h]??'');
+          echo '<td><input type="text" class="srp-edit" data-field="'.esc_attr($h).'" value="'.esc_attr($cell).'" style="width:100%" /></td>';
+        }else{
+          echo '<td>'.esc_html($r[$h]??'').'</td>';
+        }
+      }
+      echo '</tr>';
+    }
+    echo '</tbody></table>';
+
+    // DataTables + sticky header (FixedHeader extension isn't always bundled)
     $nonce = wp_create_nonce('srp_row_edit');
     echo '<script>jQuery(function($){
       if($.fn.DataTable){
-        var dt = $("#srp_race_rows").DataTable({paging:false, searching:true, info:true, scrollY:"60vh", scrollCollapse:true, scrollX:true, autoWidth:false, fixedHeader:true});
-        dt.columns.adjust();
-        $(window).on("resize", function(){ dt.columns.adjust(); });
+        $("#srp_race_rows").DataTable({paging:false, searching:true, info:true, scrollY:"60vh", scrollCollapse:true, scrollX:true});
+        if($("#srp_race_class_stats").length) $("#srp_race_class_stats").DataTable({paging:false,searching:false,info:false, scrollY:false});
       }
-      $("<style>#srp_race_rows_wrapper .dataTables_scrollHead{overflow:visible!important;}</style>").appendTo("head");
-      var nonce = ' . wp_json_encode($nonce) . ';
-      var postId = ' . (int)$post_id . ';
+
+      // Sticky headers
+      $("<style>#srp_race_rows thead th, #srp_race_class_stats thead th{position:sticky;top:0;background:#fff;z-index:3;}#srp_race_rows_wrapper .dataTables_scrollHead{overflow:visible!important;}</style>").appendTo("head");
+
+      var nonce = '.wp_json_encode($nonce).';
+      var postId = '.(int)$post_id.';
+
       function markDirty($tr){ $tr.addClass("srp-dirty"); $tr.find(".srp-row-save").prop("disabled", false); }
       $(document).on("input change", ".srp-edit, .srp-manual-ex", function(){ markDirty($(this).closest("tr")); });
+
       $(document).on("click", ".srp-row-save", function(){
         var $btn=$(this); var $tr=$btn.closest("tr");
         var rowIdx=parseInt($tr.data("row-idx"),10);
@@ -1258,13 +1491,13 @@ echo "<script>{$srp_js}</script>";
         $btn.prop("disabled", true).text("Saving...");
         $.post(ajaxurl,{action:"srp_save_row_edit",nonce:nonce,post_id:postId,row_idx:rowIdx,fields:fields,manual_excluded:manualExcluded})
           .done(function(resp){ if(resp && resp.success){ window.location.reload(); }
-            else { alert((resp&&resp.data&&resp.data.message)?resp.data.message:"Save failed"); $btn.prop("disabled",false).text("Save"); } })
+            else { alert((resp&&resp.data&&resp.data.message)?resp.data.message:"Save failed"); $btn.prop("disabled",false).text("Save"); }} )
           .fail(function(){ alert("Save failed"); $btn.prop("disabled",false).text("Save"); });
       });
     });</script>';
-  } else {
-    echo '<p><em>No rows saved for this race.</em></p>';
-  }
+  } else echo '<p><em>No rows saved.</em></p>';
+
+  echo '</div>';
 }
 
 function srp_render_import_ui(array $opts) {
@@ -1405,7 +1638,7 @@ add_action('admin_menu', function(){
 
 
 function srp_class_graph_page(){
-  if (!current_user_can('edit_posts')) return;
+  if (!current_user_can('manage_options')) return;
   $class = isset($_GET['class']) ? sanitize_text_field($_GET['class']) : '';
   if (!$class){
     echo '<div class="wrap"><h1>No class specified</h1></div>';
@@ -1440,6 +1673,15 @@ function srp_class_graph_page(){
 
     $derived = isset($cs[$class]['derived_py']) ? floatval($cs[$class]['derived_py']) : null;
 
+// Other methodologies stored in srp_analysis_dual
+$dual = json_decode((string)get_post_meta($pid,'srp_analysis_dual',true), true);
+$derived_best = null;
+$derived_rya = null;
+if (is_array($dual)) {
+  if (isset($dual['best']['class_stats'][$class]['derived_py'])) $derived_best = floatval($dual['best']['class_stats'][$class]['derived_py']);
+  if (isset($dual['rya']['class_stats'][$class]['derived_py'])) $derived_rya = floatval($dual['rya']['class_stats'][$class]['derived_py']);
+}
+
     // Actual PY/GL used: median GL from stored parsed rows for this class in this race
     $rows = json_decode((string)get_post_meta($pid,'srp_parsed_rows',true),true);
     if (!is_array($rows)) $rows = [];
@@ -1461,7 +1703,7 @@ function srp_class_graph_page(){
       $actual = ($cnt % 2) ? $gls[$mid] : (($gls[$mid-1]+$gls[$mid])/2.0);
     }
 
-    $points[]=['ts'=>$ts,'derived'=> (is_numeric($derived)? (int)round($derived): null), 'actual'=> (is_numeric($actual)? (int)round($actual): null)];
+    $points[]=['ts'=>$ts,'derived'=> (is_numeric($derived)? (int)round($derived): null),'derived_best'=> (is_numeric($derived_best)? (int)round($derived_best): null),'derived_rya'=> (is_numeric($derived_rya)? (int)round($derived_rya): null),'actual'=> (is_numeric($actual)? (int)round($actual): null)];
   }
 
   usort($points,function($a,$b){ return $a['ts'] <=> $b['ts']; });
@@ -1496,10 +1738,12 @@ function srp_class_graph_page(){
 
 
 
-  $dates=[]; $derived_vals=[]; $actual_vals=[]; $x=[]; $y=[];
+  $dates=[]; $derived_all_vals=[]; $derived_best_vals=[]; $derived_rya_vals=[]; $actual_vals=[]; $x=[]; $y=[];
   foreach ($points as $i=>$p){
     $dates[]=date('Y-m-d',$p['ts']);
-    $derived_vals[]=$p['derived'];
+    $derived_all_vals[]=$p['derived'];
+    $derived_best_vals[]=$p['derived_best'];
+    $derived_rya_vals[]=$p['derived_rya'];
     $actual_vals[]=$p['actual'];
     $x[]=$i;
     $y[]=$p['derived'];
@@ -1536,20 +1780,27 @@ function srp_class_graph_page(){
 
   // Enqueue Chart.js and inline init (no admin_enqueue timing issues)
   wp_enqueue_script('srp-chartjs', 'https://cdn.jsdelivr.net/npm/chart.js', [], null, true);
-  $inline = 'document.addEventListener("DOMContentLoaded",function(){'
-    . 'var el=document.getElementById("srp_py_chart"); if(!el) return;'
-    . 'if(typeof Chart==="undefined"){ console.warn("Chart.js not loaded"); return; }'
-    . 'var labels=' . wp_json_encode($dates) . ';'
-    . 'var derived=' . wp_json_encode($derived_vals) . ';'
-    . 'var actual=' . wp_json_encode($actual_vals) . ';'
-    . 'var trend=' . wp_json_encode($trend) . ';'
-    . 'new Chart(el,{type:"line",data:{labels:labels,datasets:['
-    . '{label:"Derived PY",data:derived,tension:0.1},'
-    . '{label:"Actual PY used",data:actual,tension:0.1},'
-    . '{label:"Trendline (derived)",data:trend,borderDash:[5,5],tension:0.1}'
-    . ']},options:{responsive:true,plugins:{legend:{display:true}},scales:{y:{title:{display:true,text:"PY"}}}}});'
-    . '});';
-  wp_add_inline_script('srp-chartjs', $inline);
+  
+// Enqueue Chart.js and inline init (no admin_enqueue timing issues)
+wp_enqueue_script('srp-chartjs', 'https://cdn.jsdelivr.net/npm/chart.js', [], null, true);
+$inline = 'document.addEventListener("DOMContentLoaded",function(){'
+  . 'var el=document.getElementById("srp_py_chart"); if(!el) return;'
+  . 'if(typeof Chart==="undefined"){ console.warn("Chart.js not loaded"); return; }'
+  . 'var labels=' . wp_json_encode($dates) . ';'
+  . 'var derived=' . wp_json_encode($derived_all_vals) . ';'
+  . 'var derived_best=' . wp_json_encode($derived_best_vals) . ';'
+  . 'var derived_rya=' . wp_json_encode($derived_rya_vals) . ';'
+  . 'var actual=' . wp_json_encode($actual_vals) . ';'
+  . 'var trend=' . wp_json_encode($trend) . ';'
+  . 'new Chart(el,{type:"line",data:{labels:labels,datasets:['
+  . '{label:"Derived PY (Allboats SD)",data:derived,tension:0.1},'
+  . '{label:"Derived PY (Best-of-class)",data:derived_best,tension:0.1},'
+  . '{label:"Derived PY (RYA median)",data:derived_rya,tension:0.1},'
+  . '{label:"Actual PY used",data:actual,tension:0.1},'
+  . '{label:"Trendline (Allboats derived)",data:trend,borderDash:[5,5],tension:0.1}'
+  . ']},options:{responsive:true,plugins:{legend:{display:true}},scales:{y:{title:{display:true,text:"PY"}}}}});'
+  . '});';
+wp_add_inline_script('srp-chartjs', $inline);
 
   echo '<div class="wrap">';
   echo '<h1>'.esc_html($class).' – PY over time</h1>';
@@ -1580,7 +1831,7 @@ add_action('admin_head', function(){
 });
 
 function srp_tools_page(){
-  if (!current_user_can('edit_posts')) return;
+  if (!current_user_can('manage_options')) return;
   echo '<div class="wrap"><h1>SRP Tools</h1>';
   if (isset($_GET['srp_done'])){
     echo '<div class="notice notice-success"><p>Recalculation completed.</p></div>';
@@ -1594,7 +1845,7 @@ function srp_tools_page(){
 }
 
 add_action('admin_post_srp_recalc_all', function(){
-  if (!current_user_can('edit_posts')) wp_die('Not allowed');
+  if (!current_user_can('manage_options')) wp_die('Not allowed');
   if (!isset($_POST['srp_nonce']) || !wp_verify_nonce($_POST['srp_nonce'], 'srp_recalc_all')) wp_die('Bad nonce');
 
   $posts = get_posts([
@@ -1611,7 +1862,24 @@ add_action('admin_post_srp_recalc_all', function(){
         $dual = srp_compute_dual_analysis($rows);
         if (is_array($dual)){
           update_post_meta($post_id, 'srp_analysis_dual', $dual);
-          if (isset($dual['all']['rows'])) update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($dual['all']['rows']));
+
+          // Save merged per-row fields so Race View can show All/Best/RYA side-by-side.
+          $all_rows  = $dual['all']['rows']  ?? [];
+          $best_rows = $dual['best']['rows'] ?? [];
+          $rya_rows  = $dual['rya']['rows']  ?? [];
+
+          $n = count($all_rows);
+          for ($i = 0; $i < $n; $i++) {
+            if (isset($best_rows[$i]['Derived PY/GL (Best)'])) $all_rows[$i]['Derived PY/GL (Best)'] = $best_rows[$i]['Derived PY/GL (Best)'];
+            if (isset($best_rows[$i]['Excluded (Best)'])) $all_rows[$i]['Excluded (Best)'] = $best_rows[$i]['Excluded (Best)'];
+            if (isset($best_rows[$i]['Exclusion Reason (Best)'])) $all_rows[$i]['Exclusion Reason (Best)'] = $best_rows[$i]['Exclusion Reason (Best)'];
+
+            if (isset($rya_rows[$i]['Derived PY/GL (RYA)'])) $all_rows[$i]['Derived PY/GL (RYA)'] = $rya_rows[$i]['Derived PY/GL (RYA)'];
+            if (isset($rya_rows[$i]['Excluded (RYA)'])) $all_rows[$i]['Excluded (RYA)'] = $rya_rows[$i]['Excluded (RYA)'];
+            if (isset($rya_rows[$i]['Exclusion Reason (RYA)'])) $all_rows[$i]['Exclusion Reason (RYA)'] = $rya_rows[$i]['Exclusion Reason (RYA)'];
+          }
+          update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($all_rows));
+
           if (isset($dual['all']['class_stats'])) update_post_meta($post_id, 'srp_class_stats', wp_json_encode($dual['all']['class_stats']));
           if (isset($dual['all']['debug'])) update_post_meta($post_id, 'srp_calc_debug', wp_json_encode($dual['all']['debug']));
         }
@@ -1627,7 +1895,7 @@ add_action('admin_post_srp_recalc_all', function(){
  * Recomputes stored SCT/PY/GL immediately so rogue rows cannot pollute class stats.
  */
 function srp_ajax_save_row_edit(){
-  if (!current_user_can('edit_posts')){
+  if (!current_user_can('manage_options')){
     wp_send_json_error(['message' => 'Permission denied'], 403);
   }
   $nonce = isset($_POST['nonce']) ? sanitize_text_field(wp_unslash($_POST['nonce'])) : '';
@@ -1660,310 +1928,171 @@ function srp_ajax_save_row_edit(){
 
   update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($rows));
 
-  // Recompute derived PY/GL immediately after edits
-  $k = floatval(get_option('srp_outlier_k', 2.0));
-  $norm_rows = $rows;
-
-  // Normalize common RYA field names into canonical keys used by stats.php
-  foreach ($norm_rows as $i => $r) {
-    if (!isset($norm_rows[$i]['GL']) || $norm_rows[$i]['GL'] === '') {
-      if (isset($r['rating']) && $r['rating'] !== '') $norm_rows[$i]['GL'] = $r['rating'];
-      elseif (isset($r['PY']) && $r['PY'] !== '') $norm_rows[$i]['GL'] = $r['PY'];
+  // Recompute dual analysis immediately
+  if (function_exists('srp_compute_dual_analysis')){
+    $dual = srp_compute_dual_analysis($rows);
+    if (is_array($dual)){
+      update_post_meta($post_id, 'srp_analysis_dual', $dual);
+      if (isset($dual['all']['rows'])) update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($dual['all']['rows']));
+      if (isset($dual['all']['class_stats'])) update_post_meta($post_id, 'srp_class_stats', wp_json_encode($dual['all']['class_stats']));
+      if (isset($dual['all']['debug'])) update_post_meta($post_id, 'srp_calc_debug', wp_json_encode($dual['all']['debug']));
     }
-    if (!isset($norm_rows[$i]['Elapsed']) || $norm_rows[$i]['Elapsed'] === '') {
-      if (isset($r['elapsed_time']) && $r['elapsed_time'] !== '') $norm_rows[$i]['Elapsed'] = $r['elapsed_time'];
-      elseif (isset($r['elapsed']) && $r['elapsed'] !== '') $norm_rows[$i]['Elapsed'] = $r['elapsed'];
-    }
-    if (!isset($norm_rows[$i]['Laps']) || $norm_rows[$i]['Laps'] === '') {
-      if (isset($r['laps']) && $r['laps'] !== '') $norm_rows[$i]['Laps'] = $r['laps'];
-      elseif (isset($r['laps_norm']) && $r['laps_norm'] !== '') $norm_rows[$i]['Laps'] = $r['laps_norm'];
-    }
-    if (!isset($norm_rows[$i]['class']) || $norm_rows[$i]['class'] === '') {
-      if (isset($r['class_name']) && $r['class_name'] !== '') $norm_rows[$i]['class'] = $r['class_name'];
-      elseif (isset($r['Class']) && $r['Class'] !== '') $norm_rows[$i]['class'] = $r['Class'];
-    }
-    if (!isset($norm_rows[$i]['elapsed']) || $norm_rows[$i]['elapsed'] === '') {
-      if (isset($norm_rows[$i]['Elapsed'])) $norm_rows[$i]['elapsed'] = $norm_rows[$i]['Elapsed'];
-    }
-    if (!isset($norm_rows[$i]['laps_norm']) || $norm_rows[$i]['laps_norm'] === '') {
-      if (isset($norm_rows[$i]['Laps'])) $norm_rows[$i]['laps_norm'] = $norm_rows[$i]['Laps'];
-    }
-    if (!isset($norm_rows[$i]['py']) || $norm_rows[$i]['py'] === '') {
-      if (isset($norm_rows[$i]['GL'])) $norm_rows[$i]['py'] = $norm_rows[$i]['GL'];
-    }
-  }
-
-  if (function_exists('srp_compute_dual')) {
-    $dual = srp_compute_dual($norm_rows, $k);
-    // Prefer the ALL method as the primary saved dataset
-    $updated_rows = $dual['all']['rows'] ?? $norm_rows;
-    $class_stats  = $dual['all']['class_stats'] ?? [];
-    $debug        = $dual['all']['debug'] ?? [];
-
-    // Ensure derived columns exist on every row so the header always shows them
-    $must_cols = [
-      'Derived PY/GL','Derived PY/GL (All)','Derived PY/GL (Best)',
-      'Excluded','Excluded (All)','Excluded (Best)',
-      'Excluded Reason (All)','Excluded Reason (Best)'
-    ];
-    foreach ($updated_rows as $ri => $rr) {
-      foreach ($must_cols as $c) {
-        if (!array_key_exists($c, $updated_rows[$ri])) $updated_rows[$ri][$c] = '';
-      }
-    }
-
-    update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($updated_rows));
-    update_post_meta($post_id, 'srp_class_stats', wp_json_encode($class_stats));
-    update_post_meta($post_id, 'srp_calc_debug', wp_json_encode($debug));
   }
 
   wp_send_json_success(['ok'=>true]);
 }
 
-// -----------------------------------------------------------------------------
-// Race Index actions: overwrite + delete
-// -----------------------------------------------------------------------------
-add_action('admin_post_srp_delete_import', 'srp_delete_import_handler');
-function srp_delete_import_handler() {
-  if (!current_user_can('delete_posts')) wp_die('Not allowed');
-  $post_id = isset($_GET['post_id']) ? intval($_GET['post_id']) : 0;
-  if (!$post_id) wp_die('Missing post_id');
-  check_admin_referer('srp_delete_import_' . $post_id);
-  wp_trash_post($post_id);
-  wp_redirect(admin_url('admin.php?page=srp-race-index&deleted=1'));
-  exit;
-}
 
-add_action('admin_post_srp_overwrite_import', 'srp_overwrite_import_handler');
-function srp_overwrite_import_handler() {
-  if (!current_user_can('edit_posts')) wp_die('Not allowed');
-  $post_id = isset($_GET['post_id']) ? intval($_GET['post_id']) : 0;
-  if (!$post_id) wp_die('Missing post_id');
-  check_admin_referer('srp_overwrite_import_' . $post_id);
+// -------------------------
+// Data QA (outlier scanner)
+// -------------------------
+function srp_data_qa_page(){
+  if (!current_user_can('edit_posts')) return;
+  $days = isset($_GET['srp_days']) ? max(1, intval($_GET['srp_days'])) : 90;
+  $abs_secs = isset($_GET['srp_abs']) ? max(0, intval($_GET['srp_abs'])) : 6*3600; // 6h
+  $mult = isset($_GET['srp_mult']) ? max(1.0, floatval($_GET['srp_mult'])) : 3.0;
+  $max_races = isset($_GET['srp_max']) ? max(10, intval($_GET['srp_max'])) : 200;
 
-  $raceid = get_post_meta($post_id, 'srp_raceid', true);
-  if (!$raceid) wp_die('Missing raceid');
-
-  // Re-fetch TT details/course/marks and overwrite stored meta
-  $race = srp_tt_fetch_race_details($raceid);
-  if (is_array($race) && empty($race['error'])) update_post_meta($post_id, 'srp_tt_race_details', wp_json_encode($race));
-
-  $course = srp_tt_fetch_course($raceid);
-  if (is_array($course) && empty($course['error'])) update_post_meta($post_id, 'srp_tt_course', wp_json_encode($course));
-
-  $marks = srp_tt_fetch_marks($raceid);
-  if (is_array($marks) && empty($marks['error'])) update_post_meta($post_id, 'srp_tt_marks', wp_json_encode($marks));
-
-  wp_redirect(admin_url('admin.php?page=srp-race-view&post_id=' . $post_id . '&overwritten=1'));
-  exit;
-}
-
-
-
-/**
- * Data QA: find suspicious rows (e.g., typos in elapsed time) across all imports.
- * Heuristic: per-lap elapsed far above the race median, or absolute elapsed very large.
- */
-function srp_data_qa_page() {
-  if (!current_user_can('manage_options')) {
-    wp_die('Sorry, you are not allowed to access this page.');
-  }
-
-  // Handle filters
-  $days = isset($_GET['days']) ? max(1, intval($_GET['days'])) : 3650; // default: ~10 years
-  $mult = isset($_GET['mult']) ? max(2, floatval($_GET['mult'])) : 3.0; // per-lap multiple vs median
-  $abs  = isset($_GET['abs']) ? max(3600, intval($_GET['abs'])) : 8*3600; // absolute elapsed threshold (seconds), default 8h
-  $limit= isset($_GET['limit']) ? max(50, intval($_GET['limit'])) : 500;
-
-  $since = gmdate('Y-m-d\TH:i:s', time() - ($days*86400));
-
+  $since = time() - ($days*86400);
   $q = new WP_Query([
-    'post_type'      => 'srp_import',
-    'post_status'    => ['publish','draft','pending','private','future'],
-    'posts_per_page' => $limit,
-    'orderby'        => 'modified',
-    'order'          => 'DESC',
-    'meta_query'     => [
+    'post_type' => 'srp_import',
+    'posts_per_page' => $max_races,
+    'post_status' => ['publish','draft','pending','private'],
+    'orderby' => 'modified',
+    'order' => 'DESC',
+    'meta_query' => [
       [
-        'key'     => 'srp_tt_race_details',
+        'key' => 'srp_race_start',
         'compare' => 'EXISTS',
       ]
-    ],
+    ]
   ]);
 
-  echo '<div class="wrap"><h1>Data QA</h1>';
-  echo '<p>Flags suspicious result rows (e.g., typo elapsed time). This does not change data until you save a correction.</p>';
-
-  // Filter form
-  echo '<form method="get" style="margin:12px 0; padding:10px; background:#fff; border:1px solid #ddd;">';
-  echo '<input type="hidden" name="page" value="srp-data-qa" />';
-  echo '<label style="margin-right:10px;">Look back days <input type="number" name="days" value="'.esc_attr($days).'" min="1" style="width:110px;"></label>';
-  echo '<label style="margin-right:10px;">Per-lap &gt; median × <input type="number" step="0.1" name="mult" value="'.esc_attr($mult).'" min="2" style="width:90px;"></label>';
-  echo '<label style="margin-right:10px;">Elapsed &gt; (sec) <input type="number" name="abs" value="'.esc_attr($abs).'" min="3600" style="width:110px;"></label>';
-  echo '<label style="margin-right:10px;">Scan max races <input type="number" name="limit" value="'.esc_attr($limit).'" min="50" style="width:110px;"></label>';
-  echo '<button class="button button-primary">Refresh</button>';
+  echo '<div class="wrap"><h1>Data QA – Outliers</h1>';
+  echo '<form method="get" style="margin:10px 0;">';
+  echo '<input type="hidden" name="page" value="srp-data-qa"/>';
+  echo 'Look back days <input type="number" name="srp_days" value="'.esc_attr($days).'" style="width:90px;"/> ';
+  echo 'Absolute elapsed threshold (sec) <input type="number" name="srp_abs" value="'.esc_attr($abs_secs).'" style="width:120px;"/> ';
+  echo 'Median multiplier <input type="number" step="0.1" name="srp_mult" value="'.esc_attr($mult).'" style="width:80px;"/> ';
+  echo '<button class="button">Scan</button>';
   echo '</form>';
 
-  $flags = [];
-
-  foreach ($q->posts as $post) {
-    $post_id = $post->ID;
-    $raceid  = get_post_meta($post_id, 'srp_raceid', true);
-    $racenm  = get_post_meta($post_id, 'srp_race_name', true);
-    $start   = '';
-    $rd_json = get_post_meta($post_id, 'srp_tt_race_details', true);
-    if ($rd_json) {
-      $rd = json_decode($rd_json, true);
-      if (is_array($rd)) {
-        $start = $rd['startDateTime'] ?? $rd['start'] ?? '';
-      }
-    }
-    if ($start === '') $start = get_post_meta($post_id, 'srp_start', true);
-
-    $rows_json = get_post_meta($post_id, 'srp_parsed_rows', true);
-    if (!$rows_json) continue;
-    $rows = json_decode($rows_json, true);
-    if (!is_array($rows) || empty($rows)) continue;
-
-    // Collect per-lap elapsed values for median
-    $perlaps = [];
-    foreach ($rows as $r) {
-      $elapsed = $r['Elapsed'] ?? $r['elapsed_time'] ?? $r['elapsed'] ?? null;
-      $laps    = $r['Laps'] ?? $r['laps'] ?? $r['laps_norm'] ?? 1;
-      $es = is_numeric($elapsed) ? floatval($elapsed) : srp_time_to_seconds($elapsed);
-      $li = max(1, intval($laps));
-      if ($es !== null && $es > 0) $perlaps[] = $es / $li;
-    }
-    if (count($perlaps) < 5) continue;
-    sort($perlaps);
-    $mid = intdiv(count($perlaps), 2);
-    $median = (count($perlaps) % 2) ? $perlaps[$mid] : (($perlaps[$mid-1] + $perlaps[$mid]) / 2.0);
-    if ($median <= 0) continue;
-
-    foreach ($rows as $i => $r) {
-      $elapsed = $r['Elapsed'] ?? $r['elapsed_time'] ?? $r['elapsed'] ?? null;
-      $laps    = $r['Laps'] ?? $r['laps'] ?? $r['laps_norm'] ?? 1;
-      $es = is_numeric($elapsed) ? floatval($elapsed) : srp_time_to_seconds($elapsed);
-      $li = max(1, intval($laps));
-      if ($es === null || $es <= 0) continue;
-
-      $perlap = $es / $li;
-
-      $reason = '';
-      if ($es >= $abs) {
-        $reason = 'Elapsed very large (' . intval($es) . 's)';
-      } elseif ($perlap >= ($median * $mult)) {
-        $reason = 'Per-lap elapsed ' . round($perlap) . 's is > median ' . round($median) . 's × ' . $mult;
-      }
-
-      if ($reason !== '') {
-        $flags[] = [
-          'post_id' => $post_id,
-          'row_i'   => $i,
-          'raceid'  => (string)$raceid,
-          'racenm'  => (string)$racenm,
-          'start'   => (string)$start,
-          'sail'    => (string)($r['SAIL NUMBER'] ?? $r['sail_number'] ?? $r['Sail Number'] ?? $r['SailNo'] ?? ''),
-          'helm'    => (string)($r['HELM NAME'] ?? $r['help_name'] ?? $r['Helm'] ?? $r['helm'] ?? ''),
-          'crew'    => (string)($r['CREW NAME'] ?? $r['crew_name'] ?? $r['Crew'] ?? $r['crew'] ?? ''),
-          'class'   => (string)($r['CLASS'] ?? $r['class_name'] ?? $r['class'] ?? ''),
-          'laps'    => $li,
-          'elapsed' => $es,
-          'perlap'  => $perlap,
-          'reason'  => $reason,
-        ];
-      }
-    }
-  }
-
-  if (empty($flags)) {
-    echo '<p><strong>No suspicious rows found</strong> using the current thresholds.</p></div>';
-    return;
-  }
-
-  // Output table
-  echo '<table class="widefat striped" style="max-width: 1400px;">';
-  echo '<thead><tr>';
-  echo '<th>Race</th><th>Start</th><th>Sail</th><th>Helm</th><th>Crew</th><th>Class</th><th>Laps</th><th>Elapsed (s)</th><th>Per lap (s)</th><th>Reason</th><th>Fix</th><th>Open</th>';
+  echo '<table class="widefat striped"><thead><tr>';
+  echo '<th>Race</th><th>Start</th><th>Class</th><th>Sail</th><th>Helm</th><th>Crew</th><th>Laps</th><th>Elapsed</th><th>Elapsed/Lap</th><th>Reason</th><th>Action</th>';
   echo '</tr></thead><tbody>';
 
-  $nonce = wp_create_nonce('srp_fix_row');
-  foreach ($flags as $f) {
-    $view_url = admin_url('admin.php?page=srp-race-view&post_id=' . intval($f['post_id']));
-    echo '<tr>';
-    $race_label = trim($f['racenm']) !== '' ? esc_html($f['racenm']) : ('Race ' . esc_html($f['raceid']));
-    echo '<td>' . $race_label . '</td>';
-    echo '<td>' . esc_html(substr((string)$f['start'], 0, 19)) . '</td>';
-    echo '<td>' . esc_html($f['sail']) . '</td>';
-    echo '<td>' . esc_html($f['helm']) . '</td>';
-    echo '<td>' . esc_html($f['crew']) . '</td>';
-    echo '<td>' . esc_html($f['class']) . '</td>';
-    echo '<td>' . esc_html((string)$f['laps']) . '</td>';
-    echo '<td>' . esc_html((string)round($f['elapsed'])) . '</td>';
-    echo '<td>' . esc_html((string)round($f['perlap'])) . '</td>';
-    echo '<td style="max-width:360px;">' . esc_html($f['reason']) . '</td>';
+  $count=0;
+  foreach ($q->posts as $p){
+    $post_id = $p->ID;
+    $start = get_post_meta($post_id,'srp_race_start',true);
+    $start_ts = $start ? strtotime((string)$start) : 0;
+    if ($start_ts && $start_ts < $since) continue;
 
-    echo '<td>';
-    echo '<form method="post" action="'.esc_url(admin_url('admin-post.php')).'" style="display:flex; gap:6px; align-items:center;">';
-    echo '<input type="hidden" name="action" value="srp_fix_row" />';
-    echo '<input type="hidden" name="_wpnonce" value="'.esc_attr($nonce).'" />';
-    echo '<input type="hidden" name="post_id" value="'.esc_attr($f['post_id']).'" />';
-    echo '<input type="hidden" name="row_i" value="'.esc_attr($f['row_i']).'" />';
-    echo '<input type="number" name="laps" value="'.esc_attr($f['laps']).'" min="1" style="width:70px;" />';
-    echo '<input type="number" name="elapsed" value="'.esc_attr((int)round($f['elapsed'])).'" min="1" style="width:110px;" />';
-    echo '<button class="button">Save</button>';
-    echo '</form>';
-    echo '</td>';
+    $rows = srp_load_rows($post_id);
+    if (empty($rows)) continue;
 
-    echo '<td><a class="button" href="'.esc_url($view_url).'" target="_blank">View</a></td>';
-    echo '</tr>';
+    // compute median elapsed/lap per race (numeric only)
+    $vals=[];
+    foreach ($rows as $r){
+      $laps = intval($r['Laps'] ?? $r['laps'] ?? $r['laps_norm'] ?? 0);
+      $elapsed = $r['Elapsed'] ?? $r['elapsed'] ?? $r['elapsed_time'] ?? null;
+      $elapsed = srp_parse_elapsed_seconds($elapsed);
+      if ($laps<=0 || $elapsed<=0) continue;
+      $vals[] = $elapsed/$laps;
+    }
+    if (empty($vals)) continue;
+    sort($vals);
+    $med = $vals[intval((count($vals)-1)/2)];
+    $limit = max($abs_secs, $med*$mult);
+
+    foreach ($rows as $r){
+      $laps = intval($r['Laps'] ?? $r['laps'] ?? $r['laps_norm'] ?? 0);
+      $elapsed_raw = $r['Elapsed'] ?? $r['elapsed'] ?? $r['elapsed_time'] ?? null;
+      $elapsed = srp_parse_elapsed_seconds($elapsed_raw);
+      if ($laps<=0 || $elapsed<=0) continue;
+      $elp = $elapsed/$laps;
+      if ($elapsed > $abs_secs || $elp > $limit){
+        $race_name = get_post_meta($post_id,'srp_race_name',true);
+        $class = $r['class'] ?? $r['class_name'] ?? $r['Class'] ?? '';
+        $sail = $r['sail_number'] ?? $r['sailno'] ?? $r['Sail Number'] ?? '';
+        $helm = $r['help_name'] ?? $r['helm_name'] ?? $r['Helm Name'] ?? '';
+        $crew = $r['crew_name'] ?? $r['Crew Name'] ?? '';
+        $reason = ($elapsed > $abs_secs ? 'Elapsed>abs ' : '').($elp > $limit ? 'Elapsed/lap>limit' : '');
+        $view = admin_url('admin.php?page=srp_race_view&post_id='.$post_id.'&srp_view=rya');
+        echo '<tr>';
+        echo '<td>'.esc_html($race_name ?: ('#'.$post_id)).'</td>';
+        echo '<td>'.esc_html($start).'</td>';
+        echo '<td>'.esc_html($class).'</td>';
+        echo '<td>'.esc_html($sail).'</td>';
+        echo '<td>'.esc_html($helm).'</td>';
+        echo '<td>'.esc_html($crew).'</td>';
+        echo '<td>'.esc_html($laps).'</td>';
+        echo '<td>'.esc_html($elapsed).'</td>';
+        echo '<td>'.esc_html(round($elp,1)).'</td>';
+        echo '<td>'.esc_html($reason).'</td>';
+        echo '<td><a class="button" href="'.esc_url($view).'">Open race</a></td>';
+        echo '</tr>';
+        $count++;
+        if ($count>500) break 2;
+      }
+    }
   }
-
-  echo '</tbody></table>';
-  echo '</div>';
+  if ($count===0){
+    echo '<tr><td colspan="11"><em>No outliers found with current thresholds.</em></td></tr>';
+  }
+  echo '</tbody></table></div>';
 }
 
-add_action('admin_post_srp_fix_row', function () {
-  if (!current_user_can('manage_options')) wp_die('Sorry, you are not allowed to do this.');
-  check_admin_referer('srp_fix_row');
 
-  $post_id = isset($_POST['post_id']) ? intval($_POST['post_id']) : 0;
-  $row_i   = isset($_POST['row_i']) ? intval($_POST['row_i']) : -1;
-  $laps    = isset($_POST['laps']) ? max(1, intval($_POST['laps'])) : 1;
-  $elapsed = isset($_POST['elapsed']) ? max(1, floatval($_POST['elapsed'])) : 0;
-
-  if ($post_id <= 0 || $row_i < 0) wp_die('Invalid request.');
-
-  $rows_json = get_post_meta($post_id, 'srp_parsed_rows', true);
-  $rows = $rows_json ? json_decode($rows_json, true) : null;
-  if (!is_array($rows) || !isset($rows[$row_i]) || !is_array($rows[$row_i])) wp_die('Row not found.');
-
-  // Update both canonical + original keys where possible
-  $rows[$row_i]['Laps'] = $laps;
-  $rows[$row_i]['laps'] = $laps;
-  $rows[$row_i]['Elapsed'] = $elapsed;
-  $rows[$row_i]['elapsed_time'] = $elapsed;
-  $rows[$row_i]['elapsed'] = $elapsed;
-
-  // Normalize and recompute derived stats
-  if (function_exists('srp_rya_normalize_rows_for_stats')) {
-    $rows = srp_rya_normalize_rows_for_stats($rows);
+// Load saved rows meta (supports array/serialized or JSON string)
+function srp_load_rows($post_id){
+  $raw = get_post_meta($post_id,'srp_parsed_rows',true);
+  if (is_array($raw)) return $raw;
+  if (is_string($raw) && $raw !== ''){
+    $j = json_decode($raw,true);
+    if (is_array($j)) return $j;
   }
-  $dual = srp_compute_dual($rows, 2.0);
-  // Prefer "all" output for saved rows (matches UI)
-  $rows_out = $dual['all']['rows'] ?? $rows;
-  if (function_exists('srp_ensure_stat_columns')) $rows_out = srp_ensure_stat_columns($rows_out);
+  return [];
+}
 
-  update_post_meta($post_id, 'srp_parsed_rows', wp_json_encode($rows_out));
-  // Save class stats (all + best) for the page
-  $class_stats = [
-    'all'  => $dual['all']['class_stats'] ?? [],
-    'best' => $dual['best']['class_stats'] ?? [],
-    'debug'=> $dual['all']['debug'] ?? [],
-  ];
-  update_post_meta($post_id, 'srp_class_stats', wp_json_encode($class_stats));
 
-  wp_safe_redirect(admin_url('admin.php?page=srp-data-qa&updated=1'));
-  exit;
-});
+// Parse elapsed time formats into seconds (supports 0.37.38, 37:38, 1:02:03, numeric seconds)
+function srp_parse_elapsed_seconds($v){
+  if ($v === null) return 0;
+  if (is_numeric($v)) return (int)round(floatval($v));
+  $s = trim((string)$v);
+  if ($s === '') return 0;
+  // replace dots with colon if looks like time
+  if (preg_match('/^\d+\.\d{2}\.\d{2}$/', $s)) $s = str_replace('.',':',$s);
+  if (preg_match('/^\d+\.\d{2}$/', $s)) $s = str_replace('.',':',$s);
+  if (preg_match('/^(\d+):(\d{2}):(\d{2})$/',$s,$m)){
+    return intval($m[1])*3600 + intval($m[2])*60 + intval($m[3]);
+  }
+  if (preg_match('/^(\d+):(\d{2})$/',$s,$m)){
+    return intval($m[1])*60 + intval($m[2]);
+  }
+  // fallback: strip non-digits
+  $num = preg_replace('/[^0-9]/','',$s);
+  return $num!=='' ? intval($num) : 0;
+}
 
+// Fetch TT race details (cached in post meta)
+function srp_tt_get_race_details_cached($post_id, $raceid){
+  $raw = get_post_meta($post_id,'srp_tt_race_details',true);
+  if (is_string($raw) && $raw !== '') {
+    $j = json_decode($raw,true);
+    if (is_array($j)) return $j;
+  }
+  if ($raceid) {
+    if (function_exists('srp_tt_api_get_race')) {
+      $j = srp_tt_api_get_race($raceid);
+      if (is_array($j)) {
+        update_post_meta($post_id,'srp_tt_race_details', wp_json_encode($j));
+        if (!empty($j['startDateTime'])) update_post_meta($post_id,'srp_race_start', (string)$j['startDateTime']);
+        if (!empty($j['name'])) update_post_meta($post_id,'srp_race_name', (string)$j['name']);
+        return $j;
+      }
+    }
+  }
+  return null;
+}
